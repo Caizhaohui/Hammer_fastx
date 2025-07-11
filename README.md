@@ -1,5 +1,4 @@
-感谢指出！我已修正了文档的格式，下面是正确的完整 Markdown 格式内容，包含后续内容的修正部分。
-markdown
+
 # Hammer_fastx
 
 Hammer_fastx 是一个使用 Rust 编写的高性能、多功能命令行工具集，用于处理 FASTA/FASTQ 文件。
