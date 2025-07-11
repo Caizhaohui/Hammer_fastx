@@ -1,3 +1,8 @@
+您好！您说得对，您看到的是我生成的 README 经过格式化渲染后的样子，所以直接复制会丢失格式。
+
+为了解决这个问题，我将为您提供纯文本的 Markdown 源码。**请完整复制下面这个代码框中的所有内容**，然后粘贴到您 GitHub 的 `README.md` 文件中即可。
+
+````markdown
 # Hammer_fastx
 
 ![Made with Rust](https://img.shields.io/badge/Made%20with-Rust-orange?style=for-the-badge&logo=rust)
@@ -33,3 +38,136 @@ cd Hammer_fastx
 
 # 使用 cargo install 进行安装
 cargo install --path .
+````
+
+安装完成后，`Hammer_fastx` 命令将在您的终端中全局可用。
+
+## 使用方法
+
+`Hammer_fastx` 的使用遵循 `Hammer_fastx <子命令> [参数]` 的标准格式。
+
+-----
+
+### 1\. `demux` - 序列拆分
+
+根据双端 barcode 将一个 FASTQ 文件拆分成多个样本文件。
+
+**用法:**
+
+```bash
+Hammer_fastx demux --inputfile <输入文件> --output <输出目录> --tags <标签文件> [其他选项]
+```
+
+**参数:**
+
+  * `--inputfile <路径>`: **必需**。输入的 FASTQ 文件，可为 `.gz` 格式。
+  * `--output <目录>`: **必需**。存放拆分后文件的输出目录。
+  * `--tags <路径>`: **必需**。包含样本和 barcode 的 CSV/TSV 文件。文件需包含 `SampleID`, `F_tag`, `R_tag` 这三列。
+  * `--threads <数字>`: (可选) 指定使用的线程数，默认为机器的物理核心数。
+  * `--tag-len <数字>`: (可选) 指定 barcode 的长度，默认为 8。
+  * `--trim`: (可选) 激活此选项以在拆分后裁剪序列两端的 barcode。
+  * `--out-fasta`: (可选) 将输出文件格式转换为 FASTA。
+
+**示例:**
+
+```bash
+Hammer_fastx demux \
+    --inputfile ./raw_data/all_reads.fastq.gz \
+    --output ./demux_results \
+    --tags ./metadata/barcodes.csv \
+    --threads 16 \
+    --trim
+```
+
+-----
+
+### 2\. `stats` - 序列统计
+
+快速计算一个 FASTA 或 FASTQ 文件的基本统计信息。
+
+**用法:**
+
+```bash
+Hammer_fastx stats --inputfile <输入文件>
+```
+
+**参数:**
+
+  * `--inputfile <路径>`: **必需**。输入的 FASTA 或 FASTQ 文件，可为 `.gz` 格式。
+
+**示例:**
+
+```bash
+Hammer_fastx stats --inputfile ./sequences.fasta.gz
+```
+
+**输出示例:**
+
+```
+==================== 统计结果 ====================
+序列总数 (Total sequences): 150000
+总碱基数 (Total bases):    75000000
+最大序列长度 (Max length):   501
+最小序列长度 (Min length):   498
+平均序列长度 (Avg length):   500.00
+================================================
+```
+
+-----
+
+### 3\. `filter` - 序列过滤
+
+根据序列的最小和/或最大长度来过滤文件。
+
+**用法:**
+
+```bash
+Hammer_fastx filter --inputfile <输入文件> [过滤选项] [输出选项]
+```
+
+**参数:**
+
+  * `--inputfile <路径>`: **必需**。输入的 FASTA 或 FASTQ 文件，可为 `.gz` 格式。
+  * `-m, --min-len <长度>`: (可选) 保留长度 **大于或等于** 该值的序列。
+  * `-M, --max-len <长度>`: (可选) 保留长度 **小于或等于** 该值的序列。
+  * `--outfile <路径>`: (可选) 将过滤结果输出到指定文件。如果省略，结果将直接输出到屏幕（标准输出）。
+
+**示例:**
+
+  * **保留长度在 100bp 到 500bp 之间的序列，并输出到新文件:**
+
+    ```bash
+    Hammer_fastx filter --inputfile reads.fastq -m 100 -M 500 --outfile filtered_reads.fastq
+    ```
+
+  * **只保留长度大于等于 300bp 的序列，并输出到屏幕:**
+
+    ```bash
+    Hammer_fastx filter --inputfile my.fasta -m 300
+    ```
+
+  * **使用管道符进行高级操作 (过滤后直接压缩):**
+
+    ```bash
+    Hammer_fastx filter --inputfile my.fasta -m 100 | gzip > filtered.fasta.gz
+    ```
+
+## 从源码构建
+
+```bash
+# 克隆仓库
+git clone [https://github.com/Caizhaohui/Hammer_fastx.git](https://github.com/Caizhaohui/Hammer_fastx.git)
+cd Hammer_fastx
+
+# 以发布模式编译
+cargo build --release
+
+# 编译好的可执行文件位于 ./target/release/Hammer_fastx
+```
+
+## 许可证
+
+本项目采用 [MIT License](https://www.google.com/search?q=LICENSE)。
+
+```
+```
