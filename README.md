@@ -1,7 +1,5 @@
 # Hammer_fastx
 
-![Made with Rust](https://img.shields.io/badge/Made%20with-Rust-orange?style=for-the-badge&logo=rust)
-
 一个使用 Rust 编写的，用于处理 FASTA/FASTQ 文件的高性能、多功能命令行工具集。
 
 ---
