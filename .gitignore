@@ -1,0 +1,12 @@
+# Rust build artifacts
+/target/
+
+# Crate registry
+.cargo/
+
+# Editor-specific files
+.vscode/
+.idea/
+
+# Other
+Cargo.lock
