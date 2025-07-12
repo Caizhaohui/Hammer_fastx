@@ -1,7 +1,7 @@
 // --- Cargo.toml ---
 // [package]
 // name = "Hammer_fastx"
-// version = "3.2.1"
+// version = "3.4.1"
 // edition = "2021"
 //
 // [dependencies]
@@ -16,9 +16,8 @@
 // num_cpus = "1.16.0"
 
 // --- src/main.rs ---
-use anyhow::Result; 
+use anyhow::Result;
 use clap::Parser;
-use std::path::PathBuf;
 
 // ==================================================================================
 // 主程序入口和子命令定义 (CLI Structure)
@@ -27,9 +26,9 @@ use std::path::PathBuf;
 #[derive(Parser, Debug)]
 #[command(
     name = "Hammer_fastx",
-    version = "v0.1.1",
-    author = "CZH with the help of Gemini pro 2.5",
-    about = "处理FASTX文件的工具"
+    version = "3.4.1",
+    author = "CZH with the help of Gemini",
+    about = "处理FASTX文件的工"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -40,9 +39,9 @@ struct Cli {
 enum Commands {
     /// 根据barcode拆分FASTQ文件
     Demux(demux::Args),
-    /// 统计FASTA/FASTQ文件中的序列信息
+    /// 统计一个或多个FASTA/FASTQ文件中的序列信息
     Stats(stats::Args),
-    /// 根据序列长度过滤FASTA/FASTQ文件
+    /// 根据序列长度过滤一个或多个FASTA/FASTQ文件
     Filter(filter::Args),
 }
 
@@ -50,36 +49,22 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Demux(args) => {
-            demux::run(args)?;
-        }
-        Commands::Stats(args) => {
-            stats::run(args)?;
-        }
-        Commands::Filter(args) => {
-            filter::run(args)?;
-        }
+        Commands::Demux(args) => demux::run(args),
+        Commands::Stats(args) => stats::run(args),
+        Commands::Filter(args) => filter::run(args),
     }
-    Ok(())
 }
 
 // ==================================================================================
-// `common` 模块: 存放共享的结构和函数
+// `common` 模块: 存放共享的工具函数
 // ==================================================================================
 mod common {
-    use super::*;
     use anyhow::{anyhow, Result};
     use flate2::bufread::MultiGzDecoder;
     use std::fs::File;
     use std::io::{BufRead, BufReader};
     use std::path::Path;
 
-    #[derive(Parser, Debug)]
-    pub struct GlobalArgs {
-        #[arg(long, help = "输入文件 (FASTA/FASTQ, 可为.gz压缩)")]
-        pub inputfile: PathBuf,
-    }
-    
     pub enum Format {
         Fasta,
         Fastq,
@@ -100,7 +85,8 @@ mod common {
             b'>' => Ok(Format::Fasta),
             b'@' => Ok(Format::Fastq),
             _ => Err(anyhow!(
-                "无法识别的文件格式，请确保文件以 '>' (FASTA) 或 '@' (FASTQ) 开头。"
+                "无法识别的文件格式: {:?}，请确保文件以 '>' (FASTA) 或 '@' (FASTQ) 开头。",
+                path
             )),
         }
     }
@@ -110,7 +96,6 @@ mod common {
 // `demux` 子命令模块
 // ==================================================================================
 mod demux {
-    use super::common::GlobalArgs;
     use anyhow::{anyhow, Context, Result};
     use bio::io::{
         fasta,
@@ -133,8 +118,8 @@ mod demux {
 
     #[derive(Parser, Debug)]
     pub struct Args {
-        #[command(flatten)]
-        global: GlobalArgs,
+        #[arg(long, help = "输入的FASTQ文件 (可为.gz压缩)")]
+        inputfile: PathBuf,
 
         #[arg(long, help = "输出目录")]
         output: PathBuf,
@@ -399,7 +384,7 @@ mod demux {
                 s.spawn(move || worker_thread(rx_raw, tx_processed, lookup_map_clone, args_clone));
             }
             drop(processed_tx);
-            reader_thread(args_arc.global.inputfile.clone(), raw_tx, pb)?;
+            reader_thread(args_arc.inputfile.clone(), raw_tx, pb)?;
             match writer_handle.join() {
                 Ok(Ok(counts)) => print_summary(counts, start_time, &output_dir),
                 Ok(Err(e)) => eprintln!("写入线程出错: {:?}", e),
@@ -415,76 +400,125 @@ mod demux {
 // `stats` 子命令模块
 // ==================================================================================
 mod stats {
-    use super::common::{detect_format, Format, GlobalArgs};
+    use super::common::{detect_format, Format};
     use anyhow::Result;
     use bio::io::{fasta, fastq};
     use clap::Parser;
     use flate2::bufread::MultiGzDecoder;
     use std::fs::File;
     use std::io::{BufRead, BufReader};
+    use std::path::{Path, PathBuf};
 
     #[derive(Parser, Debug)]
     pub struct Args {
-        #[command(flatten)]
-        global: GlobalArgs,
+        #[arg(long, help = "一个或多个输入文件 (支持通配符, e.g., '*.fasta')", required = true, num_args = 1..)]
+        inputfile: Vec<PathBuf>,
+    }
+    
+    struct FileStats {
+        filename: String,
+        count: u64,
+        total_len: u64,
+        min_len: usize,
+        max_len: usize,
+    }
+
+    fn get_sample_name(path: &Path) -> String {
+        path.file_name()
+            .unwrap_or_default()
+            .to_str()
+            .unwrap_or_default()
+            .split('.')
+            .next()
+            .unwrap_or("")
+            .to_string()
+    }
+    
+    /// 优化: 使用格式化字符串精确控制列宽和对齐
+    fn print_stats_table(stats: &[FileStats]) {
+        if stats.is_empty() {
+            println!("未处理任何文件或未找到任何序列。");
+            return;
+        }
+
+        println!("\n====================================== 序列统计汇总 ======================================");
+        // 打印表头
+        println!("{:<25} {:>15} {:>18} {:>10} {:>10} {:>12}",
+                 "样品名 (Sample)", "序列总数", "总碱基数", "最短长度", "最长长度", "平均长度");
+        // 打印分隔线
+        println!("{:-<25} {:-<15} {:-<18} {:-<10} {:-<10} {:-<12}",
+                 "", "", "", "", "", "");
+
+        for s in stats {
+            let avg_len = if s.count > 0 {
+                s.total_len as f64 / s.count as f64
+            } else {
+                0.0
+            };
+            // 打印数据行
+            println!("{:<25} {:>15} {:>18} {:>10} {:>10} {:>12.2}",
+                     s.filename, s.count, s.total_len, s.min_len, s.max_len, avg_len);
+        }
+        println!("==========================================================================================");
     }
 
     pub fn run(args: Args) -> Result<()> {
-        let input_path = &args.global.inputfile;
-        println!("---> 正在统计文件: {}", input_path.display());
-        let format = detect_format(input_path)?;
+        let mut all_stats: Vec<FileStats> = Vec::new();
 
-        let file = File::open(input_path)?;
-        let buf_reader = BufReader::new(file);
-        let input_reader: Box<dyn BufRead> =
-            if input_path.extension().map_or(false, |ext| ext == "gz") {
-                Box::new(BufReader::new(MultiGzDecoder::new(buf_reader)))
-            } else {
-                Box::new(buf_reader)
+        for input_path in &args.inputfile {
+            println!("---> 正在处理: {}", input_path.display());
+            let format = detect_format(input_path)?;
+
+            let file = File::open(input_path)?;
+            let buf_reader = BufReader::new(file);
+            let input_reader: Box<dyn BufRead> =
+                if input_path.extension().map_or(false, |ext| ext == "gz") {
+                    Box::new(BufReader::new(MultiGzDecoder::new(buf_reader)))
+                } else {
+                    Box::new(buf_reader)
+                };
+
+            let mut count = 0;
+            let mut total_len = 0;
+            let mut min_len = usize::MAX;
+            let mut max_len = 0;
+
+            match format {
+                Format::Fasta => {
+                    let reader = fasta::Reader::new(input_reader);
+                    for result in reader.records() {
+                        let record = result?;
+                        count += 1;
+                        let len = record.seq().len();
+                        total_len += len as u64;
+                        if len < min_len { min_len = len; }
+                        if len > max_len { max_len = len; }
+                    }
+                }
+                Format::Fastq => {
+                    let reader = fastq::Reader::new(input_reader);
+                    for result in reader.records() {
+                        let record = result?;
+                        count += 1;
+                        let len = record.seq().len();
+                        total_len += len as u64;
+                        if len < min_len { min_len = len; }
+                        if len > max_len { max_len = len; }
+                    }
+                }
             };
-
-        let mut count = 0;
-        let mut total_len = 0;
-        let mut min_len = usize::MAX;
-        let mut max_len = 0;
-
-        match format {
-            Format::Fasta => {
-                let reader = fasta::Reader::new(input_reader);
-                for result in reader.records() {
-                    let record = result?;
-                    count += 1;
-                    let len = record.seq().len();
-                    total_len += len;
-                    if len < min_len { min_len = len; }
-                    if len > max_len { max_len = len; }
-                }
-            }
-            Format::Fastq => {
-                let reader = fastq::Reader::new(input_reader);
-                for result in reader.records() {
-                    let record = result?;
-                    count += 1;
-                    let len = record.seq().len();
-                    total_len += len;
-                    if len < min_len { min_len = len; }
-                    if len > max_len { max_len = len; }
-                }
-            }
-        };
-
-        println!("\n==================== 统计结果 ====================");
-        if count > 0 {
-            println!("序列总数 (Total sequences): {}", count);
-            println!("总碱基数 (Total bases):    {}", total_len);
-            println!("最大序列长度 (Max length):   {}", max_len);
-            println!("最小序列长度 (Min length):   {}", min_len);
-            println!("平均序列长度 (Avg length):   {:.2}", total_len as f64 / count as f64);
-        } else {
-            println!("文件中未找到任何序列。");
+            
+            all_stats.push(FileStats {
+                filename: get_sample_name(input_path),
+                count,
+                total_len,
+                min_len: if count > 0 { min_len } else { 0 },
+                max_len,
+            });
         }
-        println!("================================================");
-
+        
+        print_stats_table(&all_stats);
+        
         Ok(())
     }
 }
@@ -493,7 +527,7 @@ mod stats {
 // `filter` 子命令模块
 // ==================================================================================
 mod filter {
-    use super::common::{detect_format, Format, GlobalArgs};
+    use super::common::{detect_format, Format};
     use anyhow::Result;
     use bio::io::{fasta, fastq};
     use clap::Parser;
@@ -504,8 +538,8 @@ mod filter {
 
     #[derive(Parser, Debug)]
     pub struct Args {
-        #[command(flatten)]
-        global: GlobalArgs,
+        #[arg(long, help = "一个或多个输入文件 (支持通配符, e.g., '*.fasta')", required = true, num_args = 1..)]
+        inputfile: Vec<PathBuf>,
 
         #[arg(long, help = "输出文件 (默认: 标准输出)")]
         outfile: Option<PathBuf>,
@@ -518,19 +552,8 @@ mod filter {
     }
 
     pub fn run(args: Args) -> Result<()> {
-        let input_path = &args.global.inputfile;
-        let format = detect_format(input_path)?;
         let min_len = args.min_len.unwrap_or(0);
         let max_len = args.max_len.unwrap_or(usize::MAX);
-
-        let file = File::open(input_path)?;
-        let buf_reader = BufReader::new(file);
-        let input_reader: Box<dyn BufRead> =
-            if input_path.extension().map_or(false, |ext| ext == "gz") {
-                Box::new(BufReader::new(MultiGzDecoder::new(buf_reader)))
-            } else {
-                Box::new(buf_reader)
-            };
 
         let mut writer: Box<dyn Write> = if let Some(path) = args.outfile {
             Box::new(BufWriter::new(File::create(path)?))
@@ -538,26 +561,39 @@ mod filter {
             Box::new(BufWriter::new(io::stdout().lock()))
         };
 
-        match format {
-            Format::Fasta => {
-                let reader = fasta::Reader::new(input_reader);
-                let mut writer = fasta::Writer::new(&mut writer);
-                for result in reader.records() {
-                    let record = result?;
-                    let len = record.seq().len();
-                    if len >= min_len && len <= max_len {
-                        writer.write_record(&record)?;
+        for input_path in &args.inputfile {
+            let format = detect_format(input_path)?;
+            
+            let file = File::open(input_path)?;
+            let buf_reader = BufReader::new(file);
+            let input_reader: Box<dyn BufRead> =
+                if input_path.extension().map_or(false, |ext| ext == "gz") {
+                    Box::new(BufReader::new(MultiGzDecoder::new(buf_reader)))
+                } else {
+                    Box::new(buf_reader)
+                };
+
+            match format {
+                Format::Fasta => {
+                    let reader = fasta::Reader::new(input_reader);
+                    let mut fasta_writer = fasta::Writer::new(&mut writer);
+                    for result in reader.records() {
+                        let record = result?;
+                        let len = record.seq().len();
+                        if len >= min_len && len <= max_len {
+                            fasta_writer.write_record(&record)?;
+                        }
                     }
                 }
-            }
-            Format::Fastq => {
-                let reader = fastq::Reader::new(input_reader);
-                let mut writer = fastq::Writer::new(&mut writer);
-                for result in reader.records() {
-                    let record = result?;
-                    let len = record.seq().len();
-                    if len >= min_len && len <= max_len {
-                        writer.write_record(&record)?;
+                Format::Fastq => {
+                    let reader = fastq::Reader::new(input_reader);
+                    let mut fastq_writer = fastq::Writer::new(&mut writer);
+                    for result in reader.records() {
+                        let record = result?;
+                        let len = record.seq().len();
+                        if len >= min_len && len <= max_len {
+                            fastq_writer.write_record(&record)?;
+                        }
                     }
                 }
             }
