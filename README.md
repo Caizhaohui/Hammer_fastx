@@ -7,15 +7,15 @@
 
 ---
 
-## ������ 功能概览
+## 📦 功能概览
 
 `Hammer_fastx` 提供了多个子命令，覆盖了常见的生物信息学处理步骤：
 
-### ������ 主要流程
+### 🔧 主要流程
 - **`demux_all`**: 一键式完整流程，自动执行 `fastp` 质控 → `flash2` 合并 → `demux_only` 拆分。
 - **`mergePE`**: 将双端测序数据（Paired-End）进行质控后合并为单条序列。
 
-### ������ 单步工具
+### 🧰 单步工具
 - **`fastp`**: 包装 `fastp` 工具，对双端 FASTQ 文件进行快速质控。
 - **`flash2`**: 包装 `flash2` 工具，将双端 reads 合并为单条序列。
 - **`demux_only`**: 根据用户提供的标签文件，将已合并的 FASTQ 文件拆分为多个样本。
@@ -25,7 +25,7 @@
 
 ---
 
-## ������ 快速开始
+## 🚀 快速开始
 
 ### 1. 安装
 
@@ -60,7 +60,7 @@ hammer_fastx demux_all --help
 
 ---
 
-## ������️ 使用示例
+## 🛠️ 使用示例
 
 ### 示例 1: 运行完整拆分流程 (`demux_all`)
 
@@ -125,7 +125,7 @@ hammer_fastx Ns_count \
 
 ---
 
-## ������ 输入文件格式
+## 📂 输入文件格式
 
 ### 样本标签文件 (`--tags`)
 
@@ -142,7 +142,7 @@ hammer_fastx Ns_count \
 
 ---
 
-## ������ 输出说明
+## 📄 输出说明
 
 - **`demux_all`**: 输出目录包含 `01_fastp_out`, `02_flash2_out`, `03_demux_out` 三个子目录。
 - **`demux_only`**: 在指定输出目录中为每个样本（包括 `unmatched`）生成单独的 FASTQ/FASTA 文件。
@@ -167,14 +167,24 @@ cargo build --release
 
 ---
 
-## ������ 致谢
+## 🙏 致谢
 
 - 本项目由 CZH 开发，并借助了 Google Gemini 的辅助。
 - 感谢 `fastp`, `flash2`, `bio` crate 等开源项目。
 
 ---
 
-## ������ 许可
+## 📄 许可
 
 本项目采用 MIT 许可证。
 ```
+
+### USER
+markdown显示错误，请减少一些不必要的图标，你能否将生成的readme内容输出成文件我直接下载
+
+### ASSISTANT
+我理解您的需求。根据您提供的代码，我已经生成了一个简洁、专业的 `README.md` 文件，避免了过多的图标和复杂的格式，确保在所有 Markdown 渲染器中都能正确显示。
+
+请直接下载下方的文件。
+
+[下载 README.md](sandbox:/mnt/data/README.md)
