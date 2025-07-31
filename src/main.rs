@@ -1,23 +1,6 @@
-// --- Cargo.toml ---
-// [package]
-// name = "Hammer_fastx"
-// version = "3.4.1"
-// edition = "2021"
-//
-// [dependencies]
-// bio = "1.2.0"
-// clap = { version = "4.5.7", features = ["derive"] }
-// csv = "1.3.0"
-// flate2 = "1.0.30"
-// indicatif = "0.17.8"
-// anyhow = "1.0.86"
-// rayon = "1.10.0"
-// crossbeam-channel = "0.5.13"
-// num_cpus = "1.16.0"
-
-// --- src/main.rs ---
-use anyhow::Result;
+﻿use anyhow::Result;
 use clap::Parser;
+use std::process::{Command, Stdio}; // 导入用于执行外部命令的模块
 
 // ==================================================================================
 // 主程序入口和子命令定义 (CLI Structure)
@@ -26,9 +9,9 @@ use clap::Parser;
 #[derive(Parser, Debug)]
 #[command(
     name = "Hammer_fastx",
-    version = "3.4.1",
+    version = "v0.7.1", // 版本号提升, 最终修复 Ns_count panic bug
     author = "CZH with the help of Gemini",
-    about = "处理FASTX文件的工"
+    about = "一个用于处理FASTX文件、集成质控和合并功能的多功能工具集"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -37,32 +20,524 @@ struct Cli {
 
 #[derive(Parser, Debug)]
 enum Commands {
-    /// 根据barcode拆分FASTQ文件
-    Demux(demux::Args),
+    /// [主流程] 运行从质控、合并到拆分的完整流程
+    #[command(name = "demux_all")]
+    DemuxAll(pipeline::Args),
+
+    /// [流程] 先质控后合并双端数据，可选择输出格式
+    #[command(name = "mergePE")]
+    MergePE(merge_pe::Args),
+
+    /// [单步骤] 仅根据barcode拆分已合并的FASTQ文件
+    #[command(name = "demux_only")]
+    DemuxOnly(demux::Args),
+
+    /// (包装器) 使用 fastp 对双端fastq文件进行质控
+    Fastp(fastp::Args),
+
+    /// (包装器) 使用 flash2 合并双端 reads
+    Flash2(flash2::Args),
+
     /// 统计一个或多个FASTA/FASTQ文件中的序列信息
     Stats(stats::Args),
+
     /// 根据序列长度过滤一个或多个FASTA/FASTQ文件
     Filter(filter::Args),
+
+    /// 将reads比对到含有N的参考序列上并提取组合
+    #[command(name = "Ns_count")]
+    NsCount(ns_count::Args),
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Demux(args) => demux::run(args),
+        Commands::DemuxAll(args) => pipeline::run(args),
+        Commands::MergePE(args) => merge_pe::run(args),
+        Commands::DemuxOnly(args) => demux::run(args),
+        Commands::Fastp(args) => fastp::run(args),
+        Commands::Flash2(args) => flash2::run(args),
         Commands::Stats(args) => stats::run(args),
         Commands::Filter(args) => filter::run(args),
+        Commands::NsCount(args) => ns_count::run(args),
     }
 }
 
 // ==================================================================================
-// `common` 模块: 存放共享的工具函数
+// `pipeline` 子命令模块 (对应 demux_all)
+// ==================================================================================
+mod pipeline {
+    use super::{demux, fastp, flash2};
+    use anyhow::{Context, Result};
+    use clap::Parser;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::Instant;
+
+    #[derive(Parser, Debug)]
+    #[command(name = "demux_all", about = "[主流程] 运行从质控(fastp)、合并(flash2)到拆分(demux)的完整流程")]
+    pub struct Args {
+        // === 主要输入 ===
+        #[arg(short = 'i', long, help = "原始输入文件1 (Raw Read1)")]
+        pub in1: PathBuf,
+
+        #[arg(short = 'I', long, help = "原始输入文件2 (Raw Read2)")]
+        pub in2: PathBuf,
+
+        #[arg(long, help = "样本标签文件 (用于 demux)")]
+        pub tags: PathBuf,
+
+        // === 主要输出 ===
+        #[arg(short = 'o', long, help = "总输出目录，所有结果和中间文件将存放于此")]
+        pub output_dir: PathBuf,
+
+        // === 流程控制 ===
+        #[arg(long, help = "流程成功结束后删除 fastp 和 flash2 的中间文件")]
+        pub cleanup: bool,
+
+        // === fastp 参数 ===
+        #[arg(long, help = "fastp 使用的线程数", default_value_t = 4)]
+        pub fastp_threads: usize,
+
+        // === flash2 参数 ===
+        #[arg(long, help = "flash2 使用的线程数", default_value_t = 4)]
+        pub flash_threads: usize,
+        #[arg(long, help = "flash2 最小重叠长度", default_value_t = 10)]
+        pub min_overlap: usize,
+        #[arg(long, help = "flash2 最大重叠长度", default_value_t = 300)]
+        pub max_overlap: usize,
+
+        // === demux_only 参数 ===
+        #[arg(long, help = "demux_only 使用的线程数", default_value_t = num_cpus::get_physical())]
+        pub demux_threads: usize,
+        #[arg(short = 'l', long, help = "demux_only 使用的标签长度", default_value_t = 8)]
+        pub tag_len: usize,
+        #[arg(long, help = "demux_only 时激活修剪标签的功能")]
+        pub trim: bool,
+        #[arg(long, help = "demux_only 后输出为 FASTA 格式 (默认为 FASTQ)")]
+        pub out_fasta: bool,
+    }
+
+    pub fn run(args: Args) -> Result<()> {
+        let total_start_time = Instant::now();
+        println!("🚀 [主流程] 开始执行 hammer_fastx demux_all 完整流程...");
+
+        // --- 1. 设置目录结构 ---
+        let fastp_dir = args.output_dir.join("01_fastp_out");
+        let flash_dir = args.output_dir.join("02_flash2_out");
+        let demux_dir = args.output_dir.join("03_demux_out");
+
+        fs::create_dir_all(&args.output_dir)
+            .with_context(|| format!("无法创建总输出目录: {:?}", args.output_dir))?;
+        fs::create_dir_all(&fastp_dir)
+            .with_context(|| format!("无法创建 fastp 输出目录: {:?}", fastp_dir))?;
+        fs::create_dir_all(&flash_dir)
+            .with_context(|| format!("无法创建 flash2 输出目录: {:?}", flash_dir))?;
+        // demux::run 会自己创建目录，这里无需预创建
+
+        // --- 2. 执行 fastp ---
+        println!("\n[步骤 1/3] ➡️  执行 fastp 质控...");
+        let fastp_out1 = fastp_dir.join("filtered_R1.fastq.gz");
+        let fastp_out2 = fastp_dir.join("filtered_R2.fastq.gz");
+        let fastp_args = fastp::Args {
+            in1: args.in1.clone(),
+            in2: args.in2.clone(),
+            out1: fastp_out1.clone(),
+            out2: fastp_out2.clone(),
+            html: Some(fastp_dir.join("fastp_report.html")),
+            json: Some(fastp_dir.join("fastp_report.json")),
+            report_title: "Hammer_fastx demux_all pipeline: fastp report".to_string(),
+            threads: Some(args.fastp_threads),
+        };
+        fastp::run(fastp_args)?;
+
+        // --- 3. 执行 flash2 ---
+        println!("\n[步骤 2/3] ➡️  执行 flash2 合并...");
+        let flash_prefix = "merged";
+        let flash_args = flash2::Args {
+            in1: fastp_out1.clone(),
+            in2: fastp_out2.clone(),
+            out_prefix: flash_prefix.to_string(),
+            out_dir: flash_dir.clone(),
+            min_overlap: args.min_overlap,
+            max_overlap: args.max_overlap,
+            threads: args.flash_threads,
+        };
+        flash2::run(flash_args)?;
+
+        // --- 4. 执行 demux_only ---
+        println!("\n[步骤 3/3] ➡️  执行 demux_only 拆分...");
+        let demux_input = flash_dir.join(format!("{}.extendedFrags.fastq", flash_prefix));
+        let demux_args = demux::Args {
+            inputfile: demux_input,
+            output: demux_dir.clone(),
+            threads: args.demux_threads,
+            tags: args.tags.clone(),
+            tag_len: args.tag_len,
+            trim: args.trim,
+            out_fasta: args.out_fasta,
+        };
+        demux::run(demux_args)?;
+
+        // --- 5. 清理中间文件 ---
+        if args.cleanup {
+            println!("\n[清理] 正在删除中间文件...");
+            fs::remove_dir_all(&fastp_dir)
+                .with_context(|| format!("清理 fastp 目录失败: {:?}", fastp_dir))?;
+            fs::remove_dir_all(&flash_dir)
+                .with_context(|| format!("清理 flash2 目录失败: {:?}", flash_dir))?;
+            println!("✔ 清理完成。");
+        }
+
+        println!("\n🎉 [主流程] 所有步骤成功完成！总耗时: {:.2?}", total_start_time.elapsed());
+        println!("最终拆分结果位于: {}", demux_dir.display());
+
+        Ok(())
+    }
+}
+
+// ==================================================================================
+// `merge_pe` 子命令模块 (无变化)
+// ==================================================================================
+mod merge_pe {
+    use super::{fastp, flash2};
+    use anyhow::{anyhow, Context, Result};
+    use bio::io::{fasta, fastq};
+    use clap::Parser;
+    use std::fs;
+    use std::io::BufReader;
+    use std::path::PathBuf;
+    use std::time::Instant;
+
+    #[derive(Parser, Debug)]
+    #[command(name = "mergePE", about = "[流程] 先用 fastp 质控，再用 flash2 合并双端数据")]
+    pub struct Args {
+        // === 主要输入 ===
+        #[arg(short = 'i', long, help = "原始输入文件1 (Raw Read1)")]
+        pub in1: PathBuf,
+        #[arg(short = 'I', long, help = "原始输入文件2 (Raw Read2)")]
+        pub in2: PathBuf,
+
+        // === 主要输出 ===
+        #[arg(short = 'o', long, help = "最终合并文件的输出路径")]
+        pub outfile: PathBuf,
+
+        // === 流程控制 ===
+        #[arg(long, help = "将最终输出格式转换为FASTA (默认: FASTQ)")]
+        pub out_fasta: bool,
+        #[arg(long, help = "流程成功结束后删除中间文件")]
+        pub cleanup: bool,
+        #[arg(long, help = "存放中间文件的目录 (默认在输出文件所在目录下创建 'intermediates')")]
+        pub temp_dir: Option<PathBuf>,
+
+        // === fastp 参数 ===
+        #[arg(long, help = "fastp 使用的线程数", default_value_t = 4)]
+        pub fastp_threads: usize,
+
+        // === flash2 参数 ===
+        #[arg(long, help = "flash2 使用的线程数", default_value_t = 4)]
+        pub flash_threads: usize,
+        #[arg(long, help = "flash2 最小重叠长度", default_value_t = 10)]
+        pub min_overlap: usize,
+        #[arg(long, help = "flash2 最大重叠长度", default_value_t = 300)]
+        pub max_overlap: usize,
+    }
+
+    pub fn run(args: Args) -> Result<()> {
+        let total_start_time = Instant::now();
+        println!("🚀 [流程] 开始执行 hammer_fastx mergePE 流程...");
+
+        // --- 1. 设置目录结构 ---
+        let output_parent_dir = args.outfile.parent().ok_or_else(|| anyhow!("无法获取输出文件的父目录"))?;
+        fs::create_dir_all(output_parent_dir)
+            .with_context(|| format!("无法创建输出目录: {:?}", output_parent_dir))?;
+
+        let temp_dir = args.temp_dir.clone().unwrap_or_else(|| output_parent_dir.join("intermediates"));
+        fs::create_dir_all(&temp_dir)
+            .with_context(|| format!("无法创建中间目录: {:?}", temp_dir))?;
+
+        // --- 2. 执行 fastp ---
+        println!("\n[步骤 1/3] ➡️  执行 fastp 质控...");
+        let fastp_out1 = temp_dir.join("filtered_R1.fastq.gz");
+        let fastp_out2 = temp_dir.join("filtered_R2.fastq.gz");
+        let fastp_args = fastp::Args {
+            in1: args.in1.clone(),
+            in2: args.in2.clone(),
+            out1: fastp_out1.clone(),
+            out2: fastp_out2.clone(),
+            html: Some(temp_dir.join("fastp_report.html")),
+            json: Some(temp_dir.join("fastp_report.json")),
+            report_title: "Hammer_fastx mergePE: fastp report".to_string(),
+            threads: Some(args.fastp_threads),
+        };
+        fastp::run(fastp_args)?;
+
+        // --- 3. 执行 flash2 ---
+        println!("\n[步骤 2/3] ➡️  执行 flash2 合并...");
+        let flash_prefix = "merged";
+        let flash_args = flash2::Args {
+            in1: fastp_out1.clone(),
+            in2: fastp_out2.clone(),
+            out_prefix: flash_prefix.to_string(),
+            out_dir: temp_dir.clone(),
+            min_overlap: args.min_overlap,
+            max_overlap: args.max_overlap,
+            threads: args.flash_threads,
+        };
+        flash2::run(flash_args)?;
+
+        // --- 4. 写入最终输出文件 (并转换格式) ---
+        println!("\n[步骤 3/3] ➡️  写入最终输出文件...");
+        let merged_fastq_path = temp_dir.join(format!("{}.extendedFrags.fastq", flash_prefix));
+        
+        let in_file = fs::File::open(&merged_fastq_path)
+            .with_context(|| format!("无法打开合并后的文件: {:?}", merged_fastq_path))?;
+        let in_reader = BufReader::new(in_file);
+        let fastq_reader = fastq::Reader::new(in_reader);
+
+        let out_file = fs::File::create(&args.outfile)
+            .with_context(|| format!("无法创建最终输出文件: {:?}", args.outfile))?;
+
+        let mut records_written = 0;
+        if args.out_fasta {
+            let mut fasta_writer = fasta::Writer::new(out_file);
+            for result in fastq_reader.records() {
+                let record = result?;
+                let fasta_record = fasta::Record::with_attrs(record.id(), record.desc(), record.seq());
+                fasta_writer.write_record(&fasta_record)?;
+                records_written += 1;
+            }
+        } else {
+            let mut fastq_writer = fastq::Writer::new(out_file);
+            for result in fastq_reader.records() {
+                let record = result?;
+                fastq_writer.write_record(&record)?;
+                records_written += 1;
+            }
+        }
+        println!("✔ 成功写入 {} 条记录到 {}", records_written, args.outfile.display());
+
+        // --- 5. 清理中间文件 ---
+        if args.cleanup {
+            println!("\n[清理] 正在删除中间文件...");
+            fs::remove_dir_all(&temp_dir)
+                .with_context(|| format!("清理中间目录失败: {:?}", temp_dir))?;
+            println!("✔ 清理完成。");
+        }
+
+        println!("\n🎉 [流程] mergePE 流程成功完成！总耗时: {:.2?}", total_start_time.elapsed());
+        Ok(())
+    }
+}
+
+
+// ==================================================================================
+// `fastp` 子命令模块 (无变化)
+// ==================================================================================
+mod fastp {
+    use super::{Command, Stdio}; // 引用顶层导入
+    use anyhow::{anyhow, Context, Result};
+    use clap::Parser;
+    use std::path::PathBuf;
+
+    #[derive(Parser, Debug)]
+    #[command(
+        name = "fastp",
+        about = "包装器: 调用 fastp 对双端fastq文件进行质控"
+    )]
+    pub struct Args {
+        #[arg(short = 'i', long, help = "输入文件1 (Read1)")]
+        pub in1: PathBuf,
+
+        #[arg(short = 'I', long, help = "输入文件2 (Read2)")]
+        pub in2: PathBuf,
+
+        #[arg(short = 'o', long, help = "输出文件1 (Read1)")]
+        pub out1: PathBuf,
+
+        #[arg(short = 'O', long, help = "输出文件2 (Read2)")]
+        pub out2: PathBuf,
+
+        #[arg(short = 'h', long, help = "指定HTML报告的输出路径")]
+        pub html: Option<PathBuf>,
+
+        #[arg(short = 'j', long, help = "指定JSON报告的输出路径")]
+        pub json: Option<PathBuf>,
+
+        #[arg(short = 'R', long, help = "报告的标题", default_value = "fastp report")]
+        pub report_title: String,
+
+        #[arg(short = 't', long, help = "线程数 (默认: 自动检测)")]
+        pub threads: Option<usize>,
+    }
+
+    /// 检查指定的外部命令是否存在于系统的PATH中
+    fn command_exists(cmd: &str) -> bool {
+        Command::new(cmd)
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok()
+    }
+
+    pub fn run(args: Args) -> Result<()> {
+        println!("---> 启动 fastp 质控流程...");
+
+        if !command_exists("fastp") {
+            return Err(anyhow!(
+                "错误: 未找到 'fastp' 可执行文件。\n请确保 fastp 已安装并存在于您的系统 PATH 环境变量中。"
+            ));
+        }
+
+        let mut cmd = Command::new("fastp");
+        cmd.arg("-i").arg(&args.in1);
+        cmd.arg("-I").arg(&args.in2);
+        cmd.arg("-o").arg(&args.out1);
+        cmd.arg("-O").arg(&args.out2);
+        cmd.arg("-R").arg(&args.report_title);
+
+        if let Some(html_path) = &args.html {
+            cmd.arg("-h").arg(html_path);
+        }
+        if let Some(json_path) = &args.json {
+            cmd.arg("-j").arg(json_path);
+        }
+        if let Some(threads) = args.threads {
+            cmd.arg("-t").arg(threads.to_string());
+        }
+
+        println!("🔧 执行命令: {:?}", cmd);
+
+        let status = cmd
+            .status()
+            .with_context(|| "执行 fastp 命令失败。请检查 fastp 是否已正确安装。")?;
+
+        if status.success() {
+            println!("\n✔ fastp 质控成功完成！");
+            println!("   - 清理后的 R1: {}", args.out1.display());
+            println!("   - 清理后的 R2: {}", args.out2.display());
+            if let Some(html_path) = &args.html {
+                println!("   - HTML 报告: {}", html_path.display());
+            }
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "fastp 执行失败，退出码: {:?}\n请检查 fastp 的输出日志以获取详细错误信息。",
+                status.code()
+            ))
+        }
+    }
+}
+
+// ==================================================================================
+// `flash2` 子命令模块 (无变化)
+// ==================================================================================
+mod flash2 {
+    use super::{Command, Stdio}; // 引用顶层导入
+    use anyhow::{anyhow, Context, Result};
+    use clap::Parser;
+    use std::path::PathBuf;
+
+    #[derive(Parser, Debug)]
+    #[command(
+        name = "flash2",
+        about = "包装器: 调用 flash2 合并双端 reads"
+    )]
+    pub struct Args {
+        #[arg(help = "输入的 Read1 文件")]
+        pub in1: PathBuf,
+        
+        #[arg(help = "输入的 Read2 文件")]
+        pub in2: PathBuf,
+
+        #[arg(short = 'o', long, help = "输出文件的前缀", default_value = "out")]
+        pub out_prefix: String,
+        
+        #[arg(short = 'd', long, help = "输出文件的目录", default_value = ".")]
+        pub out_dir: PathBuf,
+
+        #[arg(short = 'm', long, help = "最小重叠长度 (min overlap)", default_value_t = 10)]
+        pub min_overlap: usize,
+
+        #[arg(short = 'M', long, help = "最大重叠长度 (max overlap)", default_value_t = 300)]
+        pub max_overlap: usize,
+
+        #[arg(short = 't', long, help = "线程数 (默认: 1)", default_value_t = 1)]
+        pub threads: usize,
+    }
+    
+    /// 检查指定的外部命令是否存在于系统的PATH中
+    fn command_exists(cmd: &str) -> bool {
+        // flash2 没有 --version, 我们尝试直接运行它，但这有风险
+        // 一个更安全的方法是使用 which 命令 (Unix-like)
+        if cfg!(unix) {
+            Command::new("which")
+                .arg(cmd)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map_or(false, |s| s.success())
+        } else {
+            // 对于 Windows, 可以使用 where
+            Command::new("where")
+                .arg(cmd)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map_or(false, |s| s.success())
+        }
+    }
+
+    pub fn run(args: Args) -> Result<()> {
+        println!("---> 启动 flash2 合并流程...");
+        
+        if !command_exists("flash2") {
+            return Err(anyhow!(
+                "错误: 未找到 'flash2' 可执行文件。\n请确保 flash2 已安装并存在于您的系统 PATH 环境变量中。"
+            ));
+        }
+
+        let mut cmd = Command::new("flash2");
+        cmd.arg(&args.in1);
+        cmd.arg(&args.in2);
+        cmd.arg("-o").arg(&args.out_prefix);
+        cmd.arg("-d").arg(&args.out_dir);
+        cmd.arg("-m").arg(args.min_overlap.to_string());
+        cmd.arg("-M").arg(args.max_overlap.to_string());
+        cmd.arg("-t").arg(args.threads.to_string());
+
+        println!("🔧 执行命令: {:?}", cmd);
+
+        let status = cmd
+            .status()
+            .with_context(|| "执行 flash2 命令失败。请检查 flash2 是否已正确安装。")?;
+
+        if status.success() {
+            println!("\n✔ flash2 合并成功完成！");
+            println!("   - 输出目录: {}", args.out_dir.display());
+            println!("   - 输出文件前缀: {}", args.out_prefix);
+            println!("   - 合并后文件: {}", args.out_dir.join(format!("{}.extendedFrags.fastq", args.out_prefix)).display());
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "flash2 执行失败，退出码: {:?}\n请检查 flash2 的输出日志以获取详细错误信息。",
+                status.code()
+            ))
+        }
+    }
+}
+
+
+// ==================================================================================
+// `common` 模块: 存放共享的工具函数 (无变化)
 // ==================================================================================
 mod common {
     use anyhow::{anyhow, Result};
     use flate2::bufread::MultiGzDecoder;
     use std::fs::File;
-    use std::io::{BufRead, BufReader};
+    use std::io::{BufRead, BufReader, Read}; // 引入 Read trait
     use std::path::Path;
 
     pub enum Format {
@@ -80,20 +555,26 @@ mod common {
                 Box::new(buf_reader)
             };
         let mut buf = [0; 1];
-        first_char_reader.read_exact(&mut buf)?;
-        match buf[0] {
-            b'>' => Ok(Format::Fasta),
-            b'@' => Ok(Format::Fastq),
-            _ => Err(anyhow!(
-                "无法识别的文件格式: {:?}，请确保文件以 '>' (FASTA) 或 '@' (FASTQ) 开头。",
-                path
-            )),
+        // 使用 read_exact 确保我们准确读取一个字节
+        match first_char_reader.read_exact(&mut buf) {
+            Ok(_) => match buf[0] {
+                b'>' => Ok(Format::Fasta),
+                b'@' => Ok(Format::Fastq),
+                _ => Err(anyhow!(
+                    "无法识别的文件格式: {:?}，请确保文件以 '>' (FASTA) 或 '@' (FASTQ) 开头。",
+                    path
+                )),
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                Err(anyhow!("文件为空或无法读取: {:?}", path))
+            }
+            Err(e) => Err(e.into()),
         }
     }
 }
 
 // ==================================================================================
-// `demux` 子命令模块
+// `demux` 子命令模块 (对应 demux_only)
 // ==================================================================================
 mod demux {
     use anyhow::{anyhow, Context, Result};
@@ -119,25 +600,25 @@ mod demux {
     #[derive(Parser, Debug)]
     pub struct Args {
         #[arg(long, help = "输入的FASTQ文件 (可为.gz压缩)")]
-        inputfile: PathBuf,
+        pub inputfile: PathBuf,
 
         #[arg(long, help = "输出目录")]
-        output: PathBuf,
+        pub output: PathBuf,
 
         #[arg(long, help = "线程数", default_value_t = num_cpus::get_physical())]
-        threads: usize,
+        pub threads: usize,
         
-        #[arg(short, long, help = "样本标签文件 (CSV或TSV格式)")]
-        tags: PathBuf,
+        #[arg(short, long, help = "样本标签文件 (CSV格式, 列: SampleID,F_tag,R_tag)")]
+        pub tags: PathBuf,
         
         #[arg(short = 'l', long, default_value_t = 8, help = "标签的长度")]
-        tag_len: usize,
+        pub tag_len: usize,
         
         #[arg(long, help = "激活此选项以修剪拆分后序列两端的标签")]
-        trim: bool,
+        pub trim: bool,
         
         #[arg(long, help = "将输出格式转换为FASTA (默认: FASTQ)")]
-        out_fasta: bool,
+        pub out_fasta: bool,
     }
 
     #[derive(Debug, Clone)]
@@ -203,7 +684,9 @@ mod demux {
             let r_tag_rc = bio::alphabets::dna::revcomp(&r_tag);
             let fwd_key = (f_tag.clone(), r_tag_rc.clone());
             lookup_map.insert(fwd_key, MatchInfo { sample_id: sample_id.clone(), orientation: Orientation::Forward });
-            let rev_key = (r_tag_rc, f_tag);
+            
+            let f_tag_rc = bio::alphabets::dna::revcomp(&f_tag);
+            let rev_key = (r_tag_rc, f_tag_rc);
             lookup_map.insert(rev_key, MatchInfo { sample_id, orientation: Orientation::Reverse });
         }
         Ok((lookup_map, all_samples))
@@ -299,11 +782,15 @@ mod demux {
     fn writer_thread(
         rx_processed: crossbeam_channel::Receiver<ProcessedChunk>,
         output_dir: PathBuf,
-        all_samples: HashSet<String>,
+        mut all_samples: HashSet<String>,
         out_fasta: bool,
     ) -> Result<HashMap<String, u64>> {
         let mut writers: HashMap<String, GenericWriter> = HashMap::new();
         let extension = if out_fasta { "fasta" } else { "fastq" };
+        
+        // 确保 unmatched 样本也被包含
+        all_samples.insert("unmatched".to_string());
+
         for sample_id in &all_samples {
             let path = output_dir.join(format!("{}.{}", sample_id, extension));
             let file = File::create(&path)?;
@@ -314,11 +801,12 @@ mod demux {
             };
             writers.insert(sample_id.clone(), writer);
         }
+
         let mut counts: HashMap<String, u64> = HashMap::new();
         for chunk in rx_processed {
             for (sample_id, records) in chunk {
                 *counts.entry(sample_id.clone()).or_insert(0) += records.len() as u64;
-                let writer = writers.get_mut(&sample_id).unwrap();
+                let writer = writers.get_mut(&sample_id).expect("Writer for sample not found!");
                 for record in records {
                     writer.write_record(&record)?;
                 }
@@ -357,8 +845,7 @@ mod demux {
         std::fs::create_dir_all(&output_dir)
             .with_context(|| format!("无法创建输出目录: {:?}", output_dir))?;
         println!("---> 正在加载标签...");
-        let (lookup_map, mut all_samples) = load_tags(&args.tags, args.tag_len)?;
-        all_samples.insert("unmatched".to_string());
+        let (lookup_map, all_samples) = load_tags(&args.tags, args.tag_len)?;
         let lookup_map = Arc::new(lookup_map);
         let args_arc = Arc::new(args);
         let channel_capacity = args_arc.threads * 2;
@@ -397,7 +884,7 @@ mod demux {
 }
 
 // ==================================================================================
-// `stats` 子命令模块
+// `stats` 子命令模块 (无变化)
 // ==================================================================================
 mod stats {
     use super::common::{detect_format, Format};
@@ -434,7 +921,6 @@ mod stats {
             .to_string()
     }
     
-    /// 优化: 使用格式化字符串精确控制列宽和对齐
     fn print_stats_table(stats: &[FileStats]) {
         if stats.is_empty() {
             println!("未处理任何文件或未找到任何序列。");
@@ -442,10 +928,8 @@ mod stats {
         }
 
         println!("\n====================================== 序列统计汇总 ======================================");
-        // 打印表头
         println!("{:<25} {:>15} {:>18} {:>10} {:>10} {:>12}",
                  "样品名 (Sample)", "序列总数", "总碱基数", "最短长度", "最长长度", "平均长度");
-        // 打印分隔线
         println!("{:-<25} {:-<15} {:-<18} {:-<10} {:-<10} {:-<12}",
                  "", "", "", "", "", "");
 
@@ -455,9 +939,8 @@ mod stats {
             } else {
                 0.0
             };
-            // 打印数据行
-            println!("{:<25} {:>15} {:>18} {:>10} {:>10} {:>12.2}",
-                     s.filename, s.count, s.total_len, s.min_len, s.max_len, avg_len);
+            println!("{:<25} {:>15} {:>18} {:>10} {:>10} {:<12.2}",
+                       s.filename, s.count, s.total_len, s.min_len, s.max_len, avg_len);
         }
         println!("==========================================================================================");
     }
@@ -524,7 +1007,7 @@ mod stats {
 }
 
 // ==================================================================================
-// `filter` 子命令模块
+// `filter` 子命令模块 (无变化)
 // ==================================================================================
 mod filter {
     use super::common::{detect_format, Format};
@@ -602,3 +1085,312 @@ mod filter {
     }
 }
 
+// ==================================================================================
+// `ns_count` 子命令模块 (已重写并简化)
+// ==================================================================================
+mod ns_count {
+    use anyhow::{Context, Result};
+    use bio::io::fasta::{self, Record};
+    use clap::Parser;
+    use flate2::bufread::MultiGzDecoder;
+    use indicatif::{ProgressBar, ProgressStyle};
+    use std::collections::HashMap;
+    use std::fs::File;
+    use std::io::{BufRead, BufReader};
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::thread;
+
+    const CHUNK_SIZE: usize = 4096;
+
+    #[derive(Parser, Debug)]
+    pub struct Args {
+        #[arg(long, help = "包含待比对reads的FASTA文件 (可为.gz)")]
+        reads: PathBuf,
+        #[arg(long = "refSEQ", help = "包含带N区域参考序列的FASTA文件")]
+        ref_seq: PathBuf,
+        #[arg(long, help = "存放输出CSV文件的目录")]
+        output: PathBuf,
+        #[arg(long, help = "线程数", default_value_t = num_cpus::get_physical())]
+        threads: usize,
+        #[arg(long, help = "输出CSV文件中的列名前缀", default_value = "T0")]
+        group: String,
+        #[arg(long, help = "频率的小数位数", default_value_t = 2)]
+        dig: u8,
+        #[arg(long, help = "允许的最大错配数", default_value_t = 2)]
+        mismatches: usize,
+        #[arg(long, help = "Read需达到的相对于Ref的最小长度比例", default_value_t = 0.9)]
+        min_len_ratio: f64,
+        #[arg(long, help = "提取所有比对上的reads并输出到单独的FASTA文件")]
+        extract_matches: bool,
+    }
+
+    struct MatchResult {
+        ref_id: String,
+        combo: Vec<u8>,
+        read_record: Record,
+    }
+
+    struct RefData {
+        id: String,
+        seq: Vec<u8>,
+        len: usize,
+        n_blocks: Vec<(usize, usize)>,
+    }
+
+    fn find_n_blocks(seq: &[u8]) -> Vec<(usize, usize)> {
+        let mut blocks = Vec::new();
+        let mut in_block = false;
+        let mut start = 0;
+        for (i, &base) in seq.iter().enumerate() {
+            if base == b'N' {
+                if !in_block {
+                    start = i;
+                    in_block = true;
+                }
+            } else if in_block {
+                blocks.push((start, i - start));
+                in_block = false;
+            }
+        }
+        if in_block {
+            blocks.push((start, seq.len() - start));
+        }
+        blocks
+    }
+
+    // This is the completely rewritten, safer alignment function.
+    fn find_alignment(
+        read_seq: &[u8], 
+        ref_data: &RefData, 
+        max_mismatches: usize, 
+        min_len_ratio: f64,
+        is_rc_read: bool
+    ) -> Option<Vec<u8>> {
+        let read_len = read_seq.len();
+        let ref_len = ref_data.len;
+
+        // Condition 1: Check if the read is long enough compared to the reference.
+        if (read_len as f64) < (ref_len as f64 * min_len_ratio) {
+            return None;
+        }
+
+        // Condition 2: A read can't be longer than the reference for a valid alignment.
+        // This is the CRITICAL fix that prevents underflow and subsequent panics.
+        if read_len > ref_len {
+            return None;
+        }
+
+        let mut best_mismatches = usize::MAX;
+        let mut best_ref_start: Option<usize> = None;
+
+        // Find the best alignment position by sliding the read over the reference.
+        for ref_start in 0..=(ref_len - read_len) {
+            let mut current_mismatches = 0;
+            for i in 0..read_len {
+                if read_seq[i] != ref_data.seq[ref_start + i] {
+                    current_mismatches += 1;
+                }
+            }
+            if current_mismatches < best_mismatches {
+                best_mismatches = current_mismatches;
+                best_ref_start = Some(ref_start);
+            }
+        }
+
+        // If a potential best alignment was found and it's within the threshold...
+        if let Some(start_pos) = best_ref_start {
+            if best_mismatches <= max_mismatches {
+                // Condition 3: Check if this best alignment covers ALL N-blocks.
+                let mut all_n_blocks_covered = true;
+                for &(n_start, n_len) in &ref_data.n_blocks {
+                    if !(n_start >= start_pos && (n_start + n_len) <= (start_pos + read_len)) {
+                        all_n_blocks_covered = false;
+                        break;
+                    }
+                }
+
+                if all_n_blocks_covered {
+                    let mut combo_parts = Vec::new();
+                    for &(n_start, n_len) in &ref_data.n_blocks {
+                        let read_idx_start = n_start - start_pos;
+                        let segment = &read_seq[read_idx_start .. read_idx_start + n_len];
+                        if is_rc_read {
+                            combo_parts.push(bio::alphabets::dna::revcomp(segment));
+                        } else {
+                            combo_parts.push(segment.to_vec());
+                        }
+                    }
+                    return Some(combo_parts.join(&b'-'));
+                }
+            }
+        }
+        
+        None
+    }
+
+    fn collector_thread(
+        rx: crossbeam_channel::Receiver<MatchResult>,
+        output_dir: PathBuf,
+        group: String,
+        dig: u8,
+        extract_matches: bool,
+        ref_data_map: HashMap<String, Vec<(usize, usize)>>,
+    ) -> Result<()> {
+        let mut counters: HashMap<String, HashMap<Vec<u8>, u64>> = HashMap::new();
+        let mut writers: HashMap<String, fasta::Writer<File>> = HashMap::new();
+
+        for result in rx {
+            let counter = counters.entry(result.ref_id.clone()).or_default();
+            *counter.entry(result.combo).or_insert(0) += 1;
+
+            if extract_matches {
+                let writer = writers.entry(result.ref_id.clone()).or_insert_with(|| {
+                    let out_path = output_dir.join(format!("{}_matched_reads.fasta", result.ref_id));
+                    fasta::Writer::to_file(out_path).expect("Failed to create writer")
+                });
+                writer.write_record(&result.read_record)?;
+            }
+        }
+
+        for (ref_id, counter) in counters {
+            let total: u64 = counter.values().sum();
+            if total > 0 {
+                let n_blocks = ref_data_map.get(&ref_id).unwrap();
+                let n_label = (1..=n_blocks.len()).map(|i| format!("N{}", i)).collect::<Vec<_>>().join("_");
+                let out_csv_path = output_dir.join(format!("{}_combo_counts.csv", ref_id));
+                let mut csv_writer = csv::Writer::from_path(out_csv_path)?;
+                csv_writer.write_record(&[format!("{}_{}_combo", group, n_label), "Count".to_string(), "Frequency (%)".to_string()])?;
+                
+                let mut sorted_combos: Vec<_> = counter.iter().collect();
+                sorted_combos.sort_by(|a, b| b.1.cmp(a.1));
+
+                for (combo, count) in sorted_combos {
+                    let freq = (*count as f64 / total as f64) * 100.0;
+                    csv_writer.write_record(&[String::from_utf8_lossy(combo).to_string(), count.to_string(), format!("{:.1$}", freq, dig as usize)])?;
+                }
+                println!("[完成] {}: 共找到 {} 个匹配, {} 种独特组合。", ref_id, total, counter.len());
+            }
+        }
+
+        for (_, mut writer) in writers {
+            writer.flush()?;
+        }
+
+        Ok(())
+    }
+
+    pub fn run(args: Args) -> Result<()> {
+        std::fs::create_dir_all(&args.output)
+            .with_context(|| format!("无法创建输出目录: {:?}", args.output))?;
+        
+        let ref_file = File::open(&args.ref_seq)?;
+        let ref_reader = BufReader::new(ref_file);
+        let ref_records: Vec<_> = fasta::Reader::new(ref_reader).records().collect::<Result<_,_>>()?;
+        
+        let ref_data_vec: Vec<RefData> = ref_records.into_iter().filter_map(|rec| {
+            let seq = rec.seq().to_ascii_uppercase();
+            let n_blocks = find_n_blocks(&seq);
+            if n_blocks.is_empty() {
+                println!("[跳过] {}: 参考序列中未找到 'N' 区块。", rec.id());
+                return None;
+            }
+            Some(RefData {
+                id: rec.id().to_string(),
+                len: seq.len(),
+                seq,
+                n_blocks,
+            })
+        }).collect();
+        
+        println!("---> 开始并行比对 {} 条有效参考序列...", ref_data_vec.len());
+        
+        rayon::ThreadPoolBuilder::new().num_threads(args.threads).build_global()?;
+        
+        let pb = ProgressBar::new_spinner();
+        pb.enable_steady_tick(std::time::Duration::from_millis(120));
+        pb.set_style(
+            ProgressStyle::default_spinner()
+                .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"])
+                .template("{spinner:.blue} [{elapsed_precise}] {msg} {pos:>10} reads")?,
+        );
+        pb.set_message("正在读取reads...");
+
+        let args_arc = Arc::new(args);
+        let ref_data_arc = Arc::new(ref_data_vec);
+
+        thread::scope(|s| -> Result<()> {
+            let (reads_tx, reads_rx) = crossbeam_channel::bounded::<Vec<Record>>(args_arc.threads * 2);
+            let (results_tx, results_rx) = crossbeam_channel::bounded::<MatchResult>(1024);
+
+            let ref_data_for_collector: HashMap<_, _> = ref_data_arc.iter().map(|d| (d.id.clone(), d.n_blocks.clone())).collect();
+            
+            let collector_args = Arc::clone(&args_arc);
+            let collector_handle = s.spawn(move || {
+                collector_thread(results_rx, collector_args.output.clone(), collector_args.group.clone(), collector_args.dig, collector_args.extract_matches, ref_data_for_collector)
+            });
+
+            for _ in 0..args_arc.threads {
+                let rx = reads_rx.clone();
+                let tx = results_tx.clone();
+                let refs = Arc::clone(&ref_data_arc);
+                let args_clone = Arc::clone(&args_arc);
+
+                s.spawn(move || {
+                    for read_chunk in rx {
+                        for read_record in read_chunk {
+                            let read_seq = read_record.seq().to_ascii_uppercase();
+                            if read_seq.contains(&b'N') { continue; }
+
+                            for ref_data in refs.iter() {
+                                if let Some(combo) = find_alignment(&read_seq, ref_data, args_clone.mismatches, args_clone.min_len_ratio, false) {
+                                    if tx.send(MatchResult { ref_id: ref_data.id.clone(), combo, read_record: read_record.clone() }).is_ok() {
+                                        break;
+                                    }
+                                }
+                                let rc_read = bio::alphabets::dna::revcomp(&read_seq);
+                                if let Some(combo) = find_alignment(&rc_read, ref_data, args_clone.mismatches, args_clone.min_len_ratio, true) {
+                                     if tx.send(MatchResult { ref_id: ref_data.id.clone(), combo, read_record: read_record.clone() }).is_ok() {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+            drop(results_tx);
+
+            let reads_file = File::open(&args_arc.reads)?;
+            let reads_reader = BufReader::new(reads_file);
+            let boxed_reads_reader: Box<dyn BufRead> = if args_arc.reads.extension().map_or(false, |ext| ext == "gz") {
+                Box::new(BufReader::new(MultiGzDecoder::new(reads_reader)))
+            } else {
+                Box::new(reads_reader)
+            };
+            let mut records_iter = fasta::Reader::new(boxed_reads_reader).records();
+            
+            loop {
+                let mut chunk = Vec::with_capacity(CHUNK_SIZE);
+                for _ in 0..CHUNK_SIZE {
+                    match records_iter.next() {
+                        Some(Ok(record)) => chunk.push(record),
+                        Some(Err(e)) => return Err(e.into()),
+                        None => break,
+                    }
+                }
+                if chunk.is_empty() { break; }
+                pb.inc(chunk.len() as u64);
+                if reads_tx.send(chunk).is_err() { break; }
+            }
+            drop(reads_tx);
+            pb.finish_with_message("✔ reads读取完毕，等待比对完成...");
+
+            collector_handle.join().unwrap()?;
+            Ok(())
+        })?;
+
+        println!("\n✔ 所有比对任务已完成。");
+        Ok(())
+    }
+}
