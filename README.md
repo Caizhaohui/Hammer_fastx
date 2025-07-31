@@ -1,3 +1,7 @@
+### USER
+帮我给下面的代码写一个readme.md文档，markdown格式。代码如下，
+
+### ASSISTANT
 ```markdown
 # Hammer_fastx
 
