@@ -1,190 +1,154 @@
-```markdown
 # Hammer_fastx
 
-[![Version](https://img.shields.io/badge/version-v0.7.1-blue)](https://github.com/your-repo/hammer_fastx)
+> 用 Rust 语言编写的多功能 FASTA/FASTQ 文件处理工具
 
-`Hammer_fastx` 是一个专为处理高通量测序数据（FASTA/FASTQ）而设计的多功能命令行工具集。它集成了质控、合并、拆分、统计和分析等多种功能，旨在简化从原始数据到下游分析的完整工作流程。
+## 项目简介
 
----
-
-## 📦 功能概览
-
-`Hammer_fastx` 提供了多个子命令，覆盖了常见的生物信息学处理步骤：
-
-### 🔧 主要流程
-- **`demux_all`**: 一键式完整流程，自动执行 `fastp` 质控 → `flash2` 合并 → `demux_only` 拆分。
-- **`mergePE`**: 将双端测序数据（Paired-End）进行质控后合并为单条序列。
-
-### 🧰 单步工具
-- **`fastp`**: 包装 `fastp` 工具，对双端 FASTQ 文件进行快速质控。
-- **`flash2`**: 包装 `flash2` 工具，将双端 reads 合并为单条序列。
-- **`demux_only`**: 根据用户提供的标签文件，将已合并的 FASTQ 文件拆分为多个样本。
-- **`stats`**: 统计一个或多个 FASTA/FASTQ 文件的序列信息（数量、长度分布等）。
-- **`filter`**: 根据序列长度过滤 FASTA/FASTQ 文件。
-- **`Ns_count`**: 将 reads 比对到含有 N 区域的参考序列上，提取并统计 N 区域的组合（Haplotype）。
+Hammer_fastx 是一个用 Rust 开发的轻量级命令行工具，旨在高效处理生物信息学中的 FASTA 和 FASTQ 文件。适用于基因组测序数据的预处理、格式转换、质控、合并及拆分等场景。
 
 ---
 
-## 🚀 快速开始
+## 命令行参数与 `--help` 说明
 
-### 1. 安装
-
-`Hammer_fastx` 是一个 Rust 程序，您需要先安装 [Rust 工具链](https://www.rust-lang.org/tools/install)。
+运行以下命令可查看完整帮助信息：
 
 ```bash
-# 克隆仓库
-git clone https://github.com/your-repo/hammer_fastx.git
-cd hammer_fastx
-
-# 编译并安装
-cargo install --path .
+./hammer_fastx --help
 ```
 
-或者，您可以直接下载预编译的二进制文件（如果可用）。
+主要输出格式示例（不同版本略有差异）：
 
-### 2. 依赖
+```
+Hammer_fastx v0.7.1
+CZH with the help of Gemini
+一个用于处理FASTX文件、集成质控和合并功能的多功能工具集
 
-本工具依赖以下外部软件，请确保它们已安装并位于您的 `PATH` 环境变量中：
-- [`fastp`](https://github.com/OpenGene/fastp)
-- [`flash2`](https://github.com/jaekss/flash2) (或原版 `FLASH`)
+USAGE:
+    hammer_fastx <SUBCOMMAND>
 
-### 3. 查看帮助
+OPTIONS:
+    -h, --help       打印帮助信息
+    -V, --version    打印版本号
 
-```bash
-# 查看所有子命令
-hammer_fastx --help
-
-# 查看特定子命令的帮助
-hammer_fastx demux_all --help
+SUBCOMMANDS:
+    demux_all    [主流程] 运行从质控、合并到拆分的完整流程
+    mergePE      [流程] 先质控后合并双端数据，可选择输出格式
+    demux_only   [单步骤] 仅根据barcode拆分已合并的FASTQ文件
+    Fastp        (包装器) 使用 fastp 对双端fastq文件进行质控
+    Flash2       (包装器) 使用 flash2 合并双端 reads
+    Stats        统计一个或多个FASTA/FASTQ文件中的序列信息
+    Filter       根据序列长度过滤一个或多个FASTA/FASTQ文件
+    Ns_count     将reads比对到含有N的参考序列上并提取组合
 ```
 
 ---
 
-## 🛠️ 使用示例
+## 子命令与功能详细说明
 
-### 示例 1: 运行完整拆分流程 (`demux_all`)
+### 1. demux_all
+**[主流程] 一键运行质控(fastp)、合并(flash2)、barcode拆分**
 
-此命令将自动完成质控、合并和样本拆分。
+- 输入：成对的原始双端 fastq 文件、barcode 文件等
+- 步骤：依次调用 fastp 进行质控、flash2 合并 reads、barcode 拆分
+- 常用参数：
+    - `--in1`/`--in2`：输入的 R1/R2 fastq 文件
+    - `--barcode`：barcode 文件
+    - `--outdir`：输出目录
+    - `--fastp-threads`：fastp 线程数
+    - `--out-fasta`：输出为 FASTA 格式（默认 FASTQ）
+
+### 2. mergePE
+**[流程] 先用 fastp 质控，再用 flash2 合并双端数据，适于 PE 数据的融合处理**
+
+- 主要参数同上（具体参数可通过 `mergePE --help` 查看）
+
+### 3. demux_only
+**[单步骤] 仅基于 barcode 对已合并 fastq 文件进行拆分**
+
+- 用于合并后数据的快速 barcode 拆分
+- 主要参数：
+    - `--infile`：合并后的 fastq 文件
+    - `--barcode`：barcode 文件
+    - `--outdir`：结果输出目录
+
+### 4. Fastp
+**调用 fastp 对双端 fastq 文件进行质控**
+
+- 实际为外部 fastp 工具的包装，适用于高效过滤与质量统计
+- 常用参数：
+    - `-i/--in1`：输入文件1 (Read1)
+    - `-I/--in2`：输入文件2 (Read2)
+    - `-o/--out1`：输出文件1 (Read1)
+    - `-O/--out2`：输出文件2 (Read2)
+    - `-h/--html`：指定 HTML 报告输出路径
+    - `-j/--json`：指定 JSON 报告输出路径
+    - `-R/--report-title`：报告标题
+    - `-t/--threads`：线程数
+
+### 5. Flash2
+**调用 flash2 合并双端 reads**
+
+- 合并 PE reads，提升拼接效率
+- 参数详见 `Flash2 --help`
+
+### 6. Stats
+**统计FASTA/FASTQ文件中的序列信息**
+
+- 包括序列条数、总碱基数、平均长度等
+- 输入支持多个文件
+
+### 7. Filter
+**根据序列长度过滤FASTA/FASTQ文件**
+
+- 可自定义最小/最大长度阈值
+
+### 8. Ns_count
+**将 reads 比对到含 N 的参考序列并提取组合**
+
+- 适合特殊定制需求
+
+---
+
+## 使用示例
 
 ```bash
-hammer_fastx demux_all \
-  -i raw_reads/R1.fastq.gz \
-  -I raw_reads/R2.fastq.gz \
-  --tags sample_tags.csv \
-  -o ./analysis_results \
-  --cleanup
-```
+# 查看帮助
+./hammer_fastx --help
 
-### 示例 2: 合并双端数据 (`mergePE`)
+# 统计序列文件信息
+./hammer_fastx Stats -i example.fasta
 
-将质控后的双端数据合并为单条序列。
+# fastq 转换为 fasta（如有支持）
+./hammer_fastx fq2fa -i example.fastq -o output.fasta
 
-```bash
-hammer_fastx mergePE \
-  -i cleaned_R1.fastq.gz \
-  -I cleaned_R2.fastq.gz \
-  -o merged.fasta \
-  --out_fasta \
-  --cleanup
-```
-
-### 示例 3: 拆分已合并的文件 (`demux_only`)
-
-根据标签文件拆分一个已合并的 FASTQ 文件。
-
-```bash
-hammer_fastx demux_only \
-  --inputfile merged_reads.fastq \
-  --output ./demux_results \
-  --tags sample_tags.csv \
-  --tag-len 8 \
-  --trim \
-  --out_fasta
-```
-
-### 示例 4: 统计文件信息 (`stats`)
-
-统计多个文件的序列信息。
-
-```bash
-hammer_fastx stats --inputfile *.fastq.gz
-```
-
-### 示例 5: 提取 N 区域组合 (`Ns_count`)
-
-比对 reads 到带有 N 的参考序列，并统计 N 区域的组合频率。
-
-```bash
-hammer_fastx Ns_count \
-  --reads input_reads.fasta \
-  --refSEQ reference_with_Ns.fasta \
-  --output ./ns_results \
-  --group "SampleGroup" \
-  --extract_matches
+# 一键处理流程
+./hammer_fastx demux_all --in1 R1.fq.gz --in2 R2.fq.gz --barcode barcodes.txt --outdir result_dir
 ```
 
 ---
 
-## 📂 输入文件格式
+## 输入输出格式
 
-### 样本标签文件 (`--tags`)
-
-用于 `demux_only` 和 `demux_all` 的 CSV 文件，必须包含以下三列：
-
-| SampleID | F_tag | R_tag |
-| :--- | :--- | :--- |
-| Sample1 | ATGCATGC | TCGATCGA |
-| Sample2 | GCGCGCGC | ATATATAT |
-
-- `F_tag`: 正向引物/标签序列。
-- `R_tag`: 反向引物/标签序列。
-- 程序会自动处理反向互补。
+- **输入**：支持标准 FASTA (.fasta, .fa) 与 FASTQ (.fastq, .fq) 文件
+- **输出**：支持 FASTA/FASTQ，或统计、质控、合并、拆分等中间结果
 
 ---
 
-## 📄 输出说明
+## 依赖环境
 
-- **`demux_all`**: 输出目录包含 `01_fastp_out`, `02_flash2_out`, `03_demux_out` 三个子目录。
-- **`demux_only`**: 在指定输出目录中为每个样本（包括 `unmatched`）生成单独的 FASTQ/FASTA 文件。
-- **`Ns_count`**: 为每个含有 N 的参考序列生成一个 CSV 文件，报告所有观察到的组合及其频率。
-
----
-
-## ⚙️ 开发
-
-### 构建
-
-```bash
-cargo build --release
-```
-
-构建后的可执行文件位于 `target/release/hammer_fastx`。
-
-### 版本更新
-
-当前版本: `v0.7.1`
-- **主要修复**: 彻底修复了 `Ns_count` 子命令因序列长度判断不当导致的 panic bug。
+- Rust 1.60 及以上
+- 需依赖外部工具 fastp、flash2（部分子命令）
 
 ---
 
-## 🙏 致谢
+## 贡献与反馈
 
-- 本项目由 CZH 开发，并借助了 Google Gemini 的辅助。
-- 感谢 `fastp`, `flash2`, `bio` crate 等开源项目。
+欢迎 issue 与 PR！如有建议或 bug 可在 [GitHub Issues](https://github.com/Caizhaohui/Hammer_fastx/issues) 提出。
+
+## 许可证
+
+MIT License，详见 [LICENSE](./LICENSE)。
 
 ---
 
-## 📄 许可
-
-本项目采用 MIT 许可证。
-```
-
-### USER
-markdown显示错误，请减少一些不必要的图标，你能否将生成的readme内容输出成文件我直接下载
-
-### ASSISTANT
-我理解您的需求。根据您提供的代码，我已经生成了一个简洁、专业的 `README.md` 文件，避免了过多的图标和复杂的格式，确保在所有 Markdown 渲染器中都能正确显示。
-
-请直接下载下方的文件。
-
-[下载 README.md](sandbox:/mnt/data/README.md)
+**作者**：[Caizhaohui](https://github.com/Caizhaohui)
