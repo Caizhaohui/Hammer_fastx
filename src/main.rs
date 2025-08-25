@@ -1,17 +1,17 @@
-﻿use anyhow::Result;
+use anyhow::Result;
 use clap::Parser;
-use std::process::{Command, Stdio}; // 导入用于执行外部命令的模块
+use std::process::{Command, Stdio}; // For executing external commands
 
 // ==================================================================================
-// 主程序入口和子命令定义 (CLI Structure)
+// Main entry point and CLI command definitions
 // ==================================================================================
 
 #[derive(Parser, Debug)]
 #[command(
     name = "Hammer_fastx",
-    version = "v0.7.1", // 版本号提升, 最终修复 Ns_count panic bug
+    version = "v1.2.0", // Hybrid: Modern codebase with classic anchor-based Ns_count logic
     author = "CZH with the help of Gemini",
-    about = "一个用于处理FASTX文件、集成质控和合并功能的多功能工具集"
+    about = "A versatile toolkit for FASTX file processing, including QC, merging, and demultiplexing."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -20,31 +20,31 @@ struct Cli {
 
 #[derive(Parser, Debug)]
 enum Commands {
-    /// [主流程] 运行从质控、合并到拆分的完整流程
+    /// [Workflow] Run the complete pipeline from QC and merging to demultiplexing
     #[command(name = "demux_all")]
     DemuxAll(pipeline::Args),
 
-    /// [流程] 先质控后合并双端数据，可选择输出格式
+    /// [Workflow] Quality control and merge paired-end data, with optional output formats
     #[command(name = "mergePE")]
     MergePE(merge_pe::Args),
 
-    /// [单步骤] 仅根据barcode拆分已合并的FASTQ文件
+    /// [Single Step] Demultiplex a merged FASTQ file based on barcodes
     #[command(name = "demux_only")]
     DemuxOnly(demux::Args),
 
-    /// (包装器) 使用 fastp 对双端fastq文件进行质控
+    /// (Wrapper) Quality control paired-end FASTQ files using fastp
     Fastp(fastp::Args),
 
-    /// (包装器) 使用 flash2 合并双端 reads
+    /// (Wrapper) Merge paired-end reads using flash2
     Flash2(flash2::Args),
 
-    /// 统计一个或多个FASTA/FASTQ文件中的序列信息
+    /// Get sequence statistics from one or more FASTA/FASTQ files
     Stats(stats::Args),
 
-    /// 根据序列长度过滤一个或多个FASTA/FASTQ文件
+    /// Filter one or more FASTA/FASTQ files based on sequence length
     Filter(filter::Args),
 
-    /// 将reads比对到含有N的参考序列上并提取组合
+    /// [Anchor Logic] Align reads to a reference with Ns using a strict anchor-based method
     #[command(name = "Ns_count")]
     NsCount(ns_count::Args),
 }
@@ -65,7 +65,7 @@ fn main() -> Result<()> {
 }
 
 // ==================================================================================
-// `pipeline` 子命令模块 (对应 demux_all)
+// `pipeline` subcommand module (for `demux_all`)
 // ==================================================================================
 mod pipeline {
     use super::{demux, fastp, flash2};
@@ -76,68 +76,59 @@ mod pipeline {
     use std::time::Instant;
 
     #[derive(Parser, Debug)]
-    #[command(name = "demux_all", about = "[主流程] 运行从质控(fastp)、合并(flash2)到拆分(demux)的完整流程")]
+    #[command(name = "demux_all", about = "[Workflow] Run the complete pipeline: QC (fastp), merge (flash2), and demultiplex (demux)")]
     pub struct Args {
-        // === 主要输入 ===
-        #[arg(short = 'i', long, help = "原始输入文件1 (Raw Read1)")]
+        #[arg(short = 'i', long, help = "Input file 1 (Raw Read1)")]
         pub in1: PathBuf,
 
-        #[arg(short = 'I', long, help = "原始输入文件2 (Raw Read2)")]
+        #[arg(short = 'I', long, help = "Input file 2 (Raw Read2)")]
         pub in2: PathBuf,
 
-        #[arg(long, help = "样本标签文件 (用于 demux)")]
+        #[arg(long, help = "Sample tags file for demultiplexing (CSV format)")]
         pub tags: PathBuf,
 
-        // === 主要输出 ===
-        #[arg(short = 'o', long, help = "总输出目录，所有结果和中间文件将存放于此")]
+        #[arg(short = 'o', long, help = "Main output directory for all results and intermediate files")]
         pub output_dir: PathBuf,
 
-        // === 流程控制 ===
-        #[arg(long, help = "流程成功结束后删除 fastp 和 flash2 的中间文件")]
+        #[arg(long, help = "Delete intermediate files from fastp and flash2 upon successful completion")]
         pub cleanup: bool,
 
-        // === fastp 参数 ===
-        #[arg(long, help = "fastp 使用的线程数", default_value_t = 4)]
+        #[arg(long, help = "Number of threads for fastp", default_value_t = 4)]
         pub fastp_threads: usize,
 
-        // === flash2 参数 ===
-        #[arg(long, help = "flash2 使用的线程数", default_value_t = 4)]
+        #[arg(long, help = "Number of threads for flash2", default_value_t = 4)]
         pub flash_threads: usize,
-        #[arg(long, help = "flash2 最小重叠长度", default_value_t = 10)]
+        #[arg(long, help = "Minimum overlap length for flash2", default_value_t = 10)]
         pub min_overlap: usize,
-        #[arg(long, help = "flash2 最大重叠长度", default_value_t = 300)]
+        #[arg(long, help = "Maximum overlap length for flash2", default_value_t = 300)]
         pub max_overlap: usize,
 
-        // === demux_only 参数 ===
-        #[arg(long, help = "demux_only 使用的线程数", default_value_t = num_cpus::get_physical())]
+        #[arg(long, help = "Number of threads for demux_only", default_value_t = num_cpus::get_physical())]
         pub demux_threads: usize,
-        #[arg(short = 'l', long, help = "demux_only 使用的标签长度", default_value_t = 8)]
+        #[arg(short = 'l', long, help = "Tag length for demux_only", default_value_t = 8)]
         pub tag_len: usize,
-        #[arg(long, help = "demux_only 时激活修剪标签的功能")]
+        #[arg(long, help = "Activate tag trimming for demux_only")]
         pub trim: bool,
-        #[arg(long, help = "demux_only 后输出为 FASTA 格式 (默认为 FASTQ)")]
+        #[arg(long, help = "Output in FASTA format after demux_only (default: FASTQ)")]
         pub out_fasta: bool,
     }
 
     pub fn run(args: Args) -> Result<()> {
         let total_start_time = Instant::now();
-        println!("🚀 [主流程] 开始执行 hammer_fastx demux_all 完整流程...");
+        println!("🚀 [Workflow] Starting hammer_fastx demux_all pipeline...");
 
-        // --- 1. 设置目录结构 ---
         let fastp_dir = args.output_dir.join("01_fastp_out");
         let flash_dir = args.output_dir.join("02_flash2_out");
         let demux_dir = args.output_dir.join("03_demux_out");
 
         fs::create_dir_all(&args.output_dir)
-            .with_context(|| format!("无法创建总输出目录: {:?}", args.output_dir))?;
+            .with_context(|| format!("Failed to create main output directory: {:?}", args.output_dir))?;
         fs::create_dir_all(&fastp_dir)
-            .with_context(|| format!("无法创建 fastp 输出目录: {:?}", fastp_dir))?;
+            .with_context(|| format!("Failed to create fastp output directory: {:?}", fastp_dir))?;
         fs::create_dir_all(&flash_dir)
-            .with_context(|| format!("无法创建 flash2 输出目录: {:?}", flash_dir))?;
-        // demux::run 会自己创建目录，这里无需预创建
-
-        // --- 2. 执行 fastp ---
-        println!("\n[步骤 1/3] ➡️  执行 fastp 质控...");
+            .with_context(|| format!("Failed to create flash2 output directory: {:?}", flash_dir))?;
+        
+        println!("\n[Step 1/3] ➡️  Running fastp for quality control...");
         let fastp_out1 = fastp_dir.join("filtered_R1.fastq.gz");
         let fastp_out2 = fastp_dir.join("filtered_R2.fastq.gz");
         let fastp_args = fastp::Args {
@@ -152,8 +143,7 @@ mod pipeline {
         };
         fastp::run(fastp_args)?;
 
-        // --- 3. 执行 flash2 ---
-        println!("\n[步骤 2/3] ➡️  执行 flash2 合并...");
+        println!("\n[Step 2/3] ➡️  Running flash2 to merge reads...");
         let flash_prefix = "merged";
         let flash_args = flash2::Args {
             in1: fastp_out1.clone(),
@@ -166,8 +156,7 @@ mod pipeline {
         };
         flash2::run(flash_args)?;
 
-        // --- 4. 执行 demux_only ---
-        println!("\n[步骤 3/3] ➡️  执行 demux_only 拆分...");
+        println!("\n[Step 3/3] ➡️  Running demux_only to demultiplex...");
         let demux_input = flash_dir.join(format!("{}.extendedFrags.fastq", flash_prefix));
         let demux_args = demux::Args {
             inputfile: demux_input,
@@ -180,25 +169,24 @@ mod pipeline {
         };
         demux::run(demux_args)?;
 
-        // --- 5. 清理中间文件 ---
         if args.cleanup {
-            println!("\n[清理] 正在删除中间文件...");
+            println!("\n[Cleanup] Removing intermediate files...");
             fs::remove_dir_all(&fastp_dir)
-                .with_context(|| format!("清理 fastp 目录失败: {:?}", fastp_dir))?;
+                .with_context(|| format!("Failed to clean up fastp directory: {:?}", fastp_dir))?;
             fs::remove_dir_all(&flash_dir)
-                .with_context(|| format!("清理 flash2 目录失败: {:?}", flash_dir))?;
-            println!("✔ 清理完成。");
+                .with_context(|| format!("Failed to clean up flash2 directory: {:?}", flash_dir))?;
+            println!("✔ Cleanup complete.");
         }
 
-        println!("\n🎉 [主流程] 所有步骤成功完成！总耗时: {:.2?}", total_start_time.elapsed());
-        println!("最终拆分结果位于: {}", demux_dir.display());
+        println!("\n🎉 [Workflow] All steps completed successfully! Total time: {:.2?}", total_start_time.elapsed());
+        println!("Final demultiplexed results are in: {}", demux_dir.display());
 
         Ok(())
     }
 }
 
 // ==================================================================================
-// `merge_pe` 子命令模块 (无变化)
+// `merge_pe` subcommand module
 // ==================================================================================
 mod merge_pe {
     use super::{fastp, flash2};
@@ -211,54 +199,47 @@ mod merge_pe {
     use std::time::Instant;
 
     #[derive(Parser, Debug)]
-    #[command(name = "mergePE", about = "[流程] 先用 fastp 质控，再用 flash2 合并双端数据")]
+    #[command(name = "mergePE", about = "[Workflow] QC with fastp, then merge paired-end data with flash2")]
     pub struct Args {
-        // === 主要输入 ===
-        #[arg(short = 'i', long, help = "原始输入文件1 (Raw Read1)")]
+        #[arg(short = 'i', long, help = "Input file 1 (Raw Read1)")]
         pub in1: PathBuf,
-        #[arg(short = 'I', long, help = "原始输入文件2 (Raw Read2)")]
+        #[arg(short = 'I', long, help = "Input file 2 (Raw Read2)")]
         pub in2: PathBuf,
 
-        // === 主要输出 ===
-        #[arg(short = 'o', long, help = "最终合并文件的输出路径")]
+        #[arg(short = 'o', long, help = "Output path for the final merged file")]
         pub outfile: PathBuf,
 
-        // === 流程控制 ===
-        #[arg(long, help = "将最终输出格式转换为FASTA (默认: FASTQ)")]
+        #[arg(long, help = "Convert final output to FASTA format (default: FASTQ)")]
         pub out_fasta: bool,
-        #[arg(long, help = "流程成功结束后删除中间文件")]
+        #[arg(long, help = "Delete intermediate files upon successful completion")]
         pub cleanup: bool,
-        #[arg(long, help = "存放中间文件的目录 (默认在输出文件所在目录下创建 'intermediates')")]
+        #[arg(long, help = "Directory for intermediate files (default: 'intermediates' in the output file's directory)")]
         pub temp_dir: Option<PathBuf>,
 
-        // === fastp 参数 ===
-        #[arg(long, help = "fastp 使用的线程数", default_value_t = 4)]
+        #[arg(long, help = "Number of threads for fastp", default_value_t = 4)]
         pub fastp_threads: usize,
 
-        // === flash2 参数 ===
-        #[arg(long, help = "flash2 使用的线程数", default_value_t = 4)]
+        #[arg(long, help = "Number of threads for flash2", default_value_t = 4)]
         pub flash_threads: usize,
-        #[arg(long, help = "flash2 最小重叠长度", default_value_t = 10)]
+        #[arg(long, help = "Minimum overlap length for flash2", default_value_t = 10)]
         pub min_overlap: usize,
-        #[arg(long, help = "flash2 最大重叠长度", default_value_t = 300)]
+        #[arg(long, help = "Maximum overlap length for flash2", default_value_t = 300)]
         pub max_overlap: usize,
     }
 
     pub fn run(args: Args) -> Result<()> {
         let total_start_time = Instant::now();
-        println!("🚀 [流程] 开始执行 hammer_fastx mergePE 流程...");
+        println!("🚀 [Workflow] Starting hammer_fastx mergePE workflow...");
 
-        // --- 1. 设置目录结构 ---
-        let output_parent_dir = args.outfile.parent().ok_or_else(|| anyhow!("无法获取输出文件的父目录"))?;
+        let output_parent_dir = args.outfile.parent().ok_or_else(|| anyhow!("Could not get parent directory of output file"))?;
         fs::create_dir_all(output_parent_dir)
-            .with_context(|| format!("无法创建输出目录: {:?}", output_parent_dir))?;
+            .with_context(|| format!("Failed to create output directory: {:?}", output_parent_dir))?;
 
         let temp_dir = args.temp_dir.clone().unwrap_or_else(|| output_parent_dir.join("intermediates"));
         fs::create_dir_all(&temp_dir)
-            .with_context(|| format!("无法创建中间目录: {:?}", temp_dir))?;
+            .with_context(|| format!("Failed to create temporary directory: {:?}", temp_dir))?;
 
-        // --- 2. 执行 fastp ---
-        println!("\n[步骤 1/3] ➡️  执行 fastp 质控...");
+        println!("\n[Step 1/3] ➡️  Running fastp for quality control...");
         let fastp_out1 = temp_dir.join("filtered_R1.fastq.gz");
         let fastp_out2 = temp_dir.join("filtered_R2.fastq.gz");
         let fastp_args = fastp::Args {
@@ -273,8 +254,7 @@ mod merge_pe {
         };
         fastp::run(fastp_args)?;
 
-        // --- 3. 执行 flash2 ---
-        println!("\n[步骤 2/3] ➡️  执行 flash2 合并...");
+        println!("\n[Step 2/3] ➡️  Running flash2 to merge reads...");
         let flash_prefix = "merged";
         let flash_args = flash2::Args {
             in1: fastp_out1.clone(),
@@ -287,17 +267,16 @@ mod merge_pe {
         };
         flash2::run(flash_args)?;
 
-        // --- 4. 写入最终输出文件 (并转换格式) ---
-        println!("\n[步骤 3/3] ➡️  写入最终输出文件...");
+        println!("\n[Step 3/3] ➡️  Writing final output file...");
         let merged_fastq_path = temp_dir.join(format!("{}.extendedFrags.fastq", flash_prefix));
         
         let in_file = fs::File::open(&merged_fastq_path)
-            .with_context(|| format!("无法打开合并后的文件: {:?}", merged_fastq_path))?;
+            .with_context(|| format!("Failed to open merged file: {:?}", merged_fastq_path))?;
         let in_reader = BufReader::new(in_file);
         let fastq_reader = fastq::Reader::new(in_reader);
 
         let out_file = fs::File::create(&args.outfile)
-            .with_context(|| format!("无法创建最终输出文件: {:?}", args.outfile))?;
+            .with_context(|| format!("Failed to create final output file: {:?}", args.outfile))?;
 
         let mut records_written = 0;
         if args.out_fasta {
@@ -316,27 +295,25 @@ mod merge_pe {
                 records_written += 1;
             }
         }
-        println!("✔ 成功写入 {} 条记录到 {}", records_written, args.outfile.display());
+        println!("✔ Successfully wrote {} records to {}", records_written, args.outfile.display());
 
-        // --- 5. 清理中间文件 ---
         if args.cleanup {
-            println!("\n[清理] 正在删除中间文件...");
+            println!("\n[Cleanup] Removing intermediate files...");
             fs::remove_dir_all(&temp_dir)
-                .with_context(|| format!("清理中间目录失败: {:?}", temp_dir))?;
-            println!("✔ 清理完成。");
+                .with_context(|| format!("Failed to clean up temporary directory: {:?}", temp_dir))?;
+            println!("✔ Cleanup complete.");
         }
 
-        println!("\n🎉 [流程] mergePE 流程成功完成！总耗时: {:.2?}", total_start_time.elapsed());
+        println!("\n🎉 [Workflow] mergePE workflow completed successfully! Total time: {:.2?}", total_start_time.elapsed());
         Ok(())
     }
 }
 
-
 // ==================================================================================
-// `fastp` 子命令模块 (无变化)
+// `fastp` subcommand module
 // ==================================================================================
 mod fastp {
-    use super::{Command, Stdio}; // 引用顶层导入
+    use super::{Command, Stdio};
     use anyhow::{anyhow, Context, Result};
     use clap::Parser;
     use std::path::PathBuf;
@@ -344,35 +321,34 @@ mod fastp {
     #[derive(Parser, Debug)]
     #[command(
         name = "fastp",
-        about = "包装器: 调用 fastp 对双端fastq文件进行质控"
+        about = "(Wrapper) Quality control paired-end FASTQ files using fastp"
     )]
     pub struct Args {
-        #[arg(short = 'i', long, help = "输入文件1 (Read1)")]
+        #[arg(short = 'i', long, help = "Input file 1 (Read1)")]
         pub in1: PathBuf,
 
-        #[arg(short = 'I', long, help = "输入文件2 (Read2)")]
+        #[arg(short = 'I', long, help = "Input file 2 (Read2)")]
         pub in2: PathBuf,
 
-        #[arg(short = 'o', long, help = "输出文件1 (Read1)")]
+        #[arg(short = 'o', long, help = "Output file 1 (Read1)")]
         pub out1: PathBuf,
 
-        #[arg(short = 'O', long, help = "输出文件2 (Read2)")]
+        #[arg(short = 'O', long, help = "Output file 2 (Read2)")]
         pub out2: PathBuf,
 
-        #[arg(short = 'h', long, help = "指定HTML报告的输出路径")]
+        #[arg(short = 'h', long, help = "Specify path for HTML report")]
         pub html: Option<PathBuf>,
 
-        #[arg(short = 'j', long, help = "指定JSON报告的输出路径")]
+        #[arg(short = 'j', long, help = "Specify path for JSON report")]
         pub json: Option<PathBuf>,
 
-        #[arg(short = 'R', long, help = "报告的标题", default_value = "fastp report")]
+        #[arg(short = 'R', long, help = "Report title", default_value = "fastp report")]
         pub report_title: String,
 
-        #[arg(short = 't', long, help = "线程数 (默认: 自动检测)")]
+        #[arg(short = 't', long, help = "Number of threads (default: auto-detect)")]
         pub threads: Option<usize>,
     }
 
-    /// 检查指定的外部命令是否存在于系统的PATH中
     fn command_exists(cmd: &str) -> bool {
         Command::new(cmd)
             .arg("--version")
@@ -383,11 +359,11 @@ mod fastp {
     }
 
     pub fn run(args: Args) -> Result<()> {
-        println!("---> 启动 fastp 质控流程...");
+        println!("---> Starting fastp quality control...");
 
         if !command_exists("fastp") {
             return Err(anyhow!(
-                "错误: 未找到 'fastp' 可执行文件。\n请确保 fastp 已安装并存在于您的系统 PATH 环境变量中。"
+                "Error: 'fastp' executable not found.\nPlease ensure fastp is installed and in your system's PATH environment variable."
             ));
         }
 
@@ -408,23 +384,23 @@ mod fastp {
             cmd.arg("-t").arg(threads.to_string());
         }
 
-        println!("🔧 执行命令: {:?}", cmd);
+        println!("🔧 Executing command: {:?}", cmd);
 
         let status = cmd
             .status()
-            .with_context(|| "执行 fastp 命令失败。请检查 fastp 是否已正确安装。")?;
+            .with_context(|| "Failed to execute fastp command. Please check if fastp is installed correctly.")?;
 
         if status.success() {
-            println!("\n✔ fastp 质控成功完成！");
-            println!("   - 清理后的 R1: {}", args.out1.display());
-            println!("   - 清理后的 R2: {}", args.out2.display());
+            println!("\n✔ fastp quality control completed successfully!");
+            println!("    - Cleaned R1: {}", args.out1.display());
+            println!("    - Cleaned R2: {}", args.out2.display());
             if let Some(html_path) = &args.html {
-                println!("   - HTML 报告: {}", html_path.display());
+                println!("    - HTML Report: {}", html_path.display());
             }
             Ok(())
         } else {
             Err(anyhow!(
-                "fastp 执行失败，退出码: {:?}\n请检查 fastp 的输出日志以获取详细错误信息。",
+                "fastp execution failed with exit code: {:?}\nPlease check the fastp logs for detailed error information.",
                 status.code()
             ))
         }
@@ -432,10 +408,10 @@ mod fastp {
 }
 
 // ==================================================================================
-// `flash2` 子命令模块 (无变化)
+// `flash2` subcommand module
 // ==================================================================================
 mod flash2 {
-    use super::{Command, Stdio}; // 引用顶层导入
+    use super::{Command, Stdio};
     use anyhow::{anyhow, Context, Result};
     use clap::Parser;
     use std::path::PathBuf;
@@ -443,35 +419,32 @@ mod flash2 {
     #[derive(Parser, Debug)]
     #[command(
         name = "flash2",
-        about = "包装器: 调用 flash2 合并双端 reads"
+        about = "(Wrapper) Merge paired-end reads using flash2"
     )]
     pub struct Args {
-        #[arg(help = "输入的 Read1 文件")]
+        #[arg(help = "Input Read1 file")]
         pub in1: PathBuf,
         
-        #[arg(help = "输入的 Read2 文件")]
+        #[arg(help = "Input Read2 file")]
         pub in2: PathBuf,
 
-        #[arg(short = 'o', long, help = "输出文件的前缀", default_value = "out")]
+        #[arg(short = 'o', long, help = "Output file prefix", default_value = "out")]
         pub out_prefix: String,
         
-        #[arg(short = 'd', long, help = "输出文件的目录", default_value = ".")]
+        #[arg(short = 'd', long, help = "Output directory", default_value = ".")]
         pub out_dir: PathBuf,
 
-        #[arg(short = 'm', long, help = "最小重叠长度 (min overlap)", default_value_t = 10)]
+        #[arg(short = 'm', long, help = "Minimum overlap length", default_value_t = 10)]
         pub min_overlap: usize,
 
-        #[arg(short = 'M', long, help = "最大重叠长度 (max overlap)", default_value_t = 300)]
+        #[arg(short = 'M', long, help = "Maximum overlap length", default_value_t = 300)]
         pub max_overlap: usize,
 
-        #[arg(short = 't', long, help = "线程数 (默认: 1)", default_value_t = 1)]
+        #[arg(short = 't', long, help = "Number of threads (default: 1)", default_value_t = 1)]
         pub threads: usize,
     }
     
-    /// 检查指定的外部命令是否存在于系统的PATH中
     fn command_exists(cmd: &str) -> bool {
-        // flash2 没有 --version, 我们尝试直接运行它，但这有风险
-        // 一个更安全的方法是使用 which 命令 (Unix-like)
         if cfg!(unix) {
             Command::new("which")
                 .arg(cmd)
@@ -480,7 +453,6 @@ mod flash2 {
                 .status()
                 .map_or(false, |s| s.success())
         } else {
-            // 对于 Windows, 可以使用 where
             Command::new("where")
                 .arg(cmd)
                 .stdout(Stdio::null())
@@ -491,11 +463,11 @@ mod flash2 {
     }
 
     pub fn run(args: Args) -> Result<()> {
-        println!("---> 启动 flash2 合并流程...");
+        println!("---> Starting flash2 read merging...");
         
         if !command_exists("flash2") {
             return Err(anyhow!(
-                "错误: 未找到 'flash2' 可执行文件。\n请确保 flash2 已安装并存在于您的系统 PATH 环境变量中。"
+                "Error: 'flash2' executable not found.\nPlease ensure flash2 is installed and in your system's PATH environment variable."
             ));
         }
 
@@ -508,36 +480,35 @@ mod flash2 {
         cmd.arg("-M").arg(args.max_overlap.to_string());
         cmd.arg("-t").arg(args.threads.to_string());
 
-        println!("🔧 执行命令: {:?}", cmd);
+        println!("🔧 Executing command: {:?}", cmd);
 
         let status = cmd
             .status()
-            .with_context(|| "执行 flash2 命令失败。请检查 flash2 是否已正确安装。")?;
+            .with_context(|| "Failed to execute flash2 command. Please check if flash2 is installed correctly.")?;
 
         if status.success() {
-            println!("\n✔ flash2 合并成功完成！");
-            println!("   - 输出目录: {}", args.out_dir.display());
-            println!("   - 输出文件前缀: {}", args.out_prefix);
-            println!("   - 合并后文件: {}", args.out_dir.join(format!("{}.extendedFrags.fastq", args.out_prefix)).display());
+            println!("\n✔ flash2 merging completed successfully!");
+            println!("    - Output directory: {}", args.out_dir.display());
+            println!("    - Output prefix: {}", args.out_prefix);
+            println!("    - Merged file: {}", args.out_dir.join(format!("{}.extendedFrags.fastq", args.out_prefix)).display());
             Ok(())
         } else {
             Err(anyhow!(
-                "flash2 执行失败，退出码: {:?}\n请检查 flash2 的输出日志以获取详细错误信息。",
+                "flash2 execution failed with exit code: {:?}\nPlease check the flash2 logs for detailed error information.",
                 status.code()
             ))
         }
     }
 }
 
-
 // ==================================================================================
-// `common` 模块: 存放共享的工具函数 (无变化)
+// `common` module: Shared utility functions
 // ==================================================================================
 mod common {
     use anyhow::{anyhow, Result};
     use flate2::bufread::MultiGzDecoder;
     use std::fs::File;
-    use std::io::{BufRead, BufReader, Read}; // 引入 Read trait
+    use std::io::{BufRead, BufReader, Read};
     use std::path::Path;
 
     pub enum Format {
@@ -555,18 +526,17 @@ mod common {
                 Box::new(buf_reader)
             };
         let mut buf = [0; 1];
-        // 使用 read_exact 确保我们准确读取一个字节
         match first_char_reader.read_exact(&mut buf) {
             Ok(_) => match buf[0] {
                 b'>' => Ok(Format::Fasta),
                 b'@' => Ok(Format::Fastq),
                 _ => Err(anyhow!(
-                    "无法识别的文件格式: {:?}，请确保文件以 '>' (FASTA) 或 '@' (FASTQ) 开头。",
+                    "Cannot identify file format for {:?}. Please ensure it starts with '>' (FASTA) or '@' (FASTQ).",
                     path
                 )),
             },
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                Err(anyhow!("文件为空或无法读取: {:?}", path))
+                Err(anyhow!("File is empty or unreadable: {:?}", path))
             }
             Err(e) => Err(e.into()),
         }
@@ -574,7 +544,7 @@ mod common {
 }
 
 // ==================================================================================
-// `demux` 子命令模块 (对应 demux_only)
+// `demux` subcommand module (for `demux_only`)
 // ==================================================================================
 mod demux {
     use anyhow::{anyhow, Context, Result};
@@ -599,25 +569,25 @@ mod demux {
 
     #[derive(Parser, Debug)]
     pub struct Args {
-        #[arg(long, help = "输入的FASTQ文件 (可为.gz压缩)")]
+        #[arg(long, help = "Input FASTQ file (can be gzipped)")]
         pub inputfile: PathBuf,
 
-        #[arg(long, help = "输出目录")]
+        #[arg(long, help = "Output directory")]
         pub output: PathBuf,
 
-        #[arg(long, help = "线程数", default_value_t = num_cpus::get_physical())]
+        #[arg(long, help = "Number of threads", default_value_t = num_cpus::get_physical())]
         pub threads: usize,
         
-        #[arg(short, long, help = "样本标签文件 (CSV格式, 列: SampleID,F_tag,R_tag)")]
+        #[arg(short, long, help = "Sample tags file (CSV format: SampleID,F_tag,R_tag)")]
         pub tags: PathBuf,
         
-        #[arg(short = 'l', long, default_value_t = 8, help = "标签的长度")]
+        #[arg(short = 'l', long, default_value_t = 8, help = "Length of the tags")]
         pub tag_len: usize,
         
-        #[arg(long, help = "激活此选项以修剪拆分后序列两端的标签")]
+        #[arg(long, help = "Activate this flag to trim tags from both ends of the sequence")]
         pub trim: bool,
         
-        #[arg(long, help = "将输出格式转换为FASTA (默认: FASTQ)")]
+        #[arg(long, help = "Convert output to FASTA format (default: FASTQ)")]
         pub out_fasta: bool,
     }
 
@@ -657,7 +627,7 @@ mod demux {
         let mut lookup_map = HashMap::new();
         let mut all_samples = HashSet::new();
         let file = File::open(tag_file)
-            .with_context(|| format!("无法打开标签文件: {:?}", tag_file))?;
+            .with_context(|| format!("Failed to open tag file: {:?}", tag_file))?;
         let mut rdr = ReaderBuilder::new()
             .has_headers(true)
             .flexible(true)
@@ -669,16 +639,16 @@ mod demux {
             || !headers.iter().any(|h| h == "R_tag")
         {
             return Err(anyhow!(
-                "标签文件必须包含 'SampleID', 'F_tag', 'R_tag' 这几列。"
+                "Tag file must contain the columns 'SampleID', 'F_tag', and 'R_tag'."
             ));
         }
         for result in rdr.records() {
             let record = result?;
-            let sample_id = record.get(0).ok_or_else(|| anyhow!("缺少 SampleID"))?.to_string();
-            let f_tag = record.get(1).ok_or_else(|| anyhow!("缺少 F_tag"))?.as_bytes().to_ascii_uppercase();
-            let r_tag = record.get(2).ok_or_else(|| anyhow!("缺少 R_tag"))?.as_bytes().to_ascii_uppercase();
+            let sample_id = record.get(0).ok_or_else(|| anyhow!("Missing SampleID"))?.to_string();
+            let f_tag = record.get(1).ok_or_else(|| anyhow!("Missing F_tag"))?.as_bytes().to_ascii_uppercase();
+            let r_tag = record.get(2).ok_or_else(|| anyhow!("Missing R_tag"))?.as_bytes().to_ascii_uppercase();
             if f_tag.len() != tag_len || r_tag.len() != tag_len {
-                return Err(anyhow!("样本 {} 的标签长度与指定的 --tag-len {} 不匹配", sample_id, tag_len));
+                return Err(anyhow!("Tag length for sample {} does not match the specified --tag-len {}", sample_id, tag_len));
             }
             all_samples.insert(sample_id.clone());
             let r_tag_rc = bio::alphabets::dna::revcomp(&r_tag);
@@ -722,7 +692,7 @@ mod demux {
                 break;
             }
         }
-        pb.finish_with_message("✔ 文件读取完成");
+        pb.finish_with_message("✔ File reading complete");
         Ok(())
     }
     fn worker_thread(
@@ -788,7 +758,6 @@ mod demux {
         let mut writers: HashMap<String, GenericWriter> = HashMap::new();
         let extension = if out_fasta { "fasta" } else { "fastq" };
         
-        // 确保 unmatched 样本也被包含
         all_samples.insert("unmatched".to_string());
 
         for sample_id in &all_samples {
@@ -818,33 +787,33 @@ mod demux {
         let duration = start_time.elapsed();
         let total_reads = counts.values().sum::<u64>();
         let matched_reads = total_reads - *counts.get("unmatched").unwrap_or(&0);
-        println!("\n\n==================== 拆分总结 (多线程) ====================");
-        println!("处理耗时: {:.2?}", duration);
-        println!("总处理 Reads: {}", total_reads);
+        println!("\n\n==================== Demultiplexing Summary (Multi-threaded) ====================");
+        println!("Processing Time: {:.2?}", duration);
+        println!("Total Reads Processed: {}", total_reads);
         if total_reads > 0 {
             let matched_percent = matched_reads as f64 * 100.0 / total_reads as f64;
             let unmatched_percent = *counts.get("unmatched").unwrap_or(&0) as f64 * 100.0 / total_reads as f64;
-            println!("  - 匹配上的 Reads: {:>10} ({:.2}%)", matched_reads, matched_percent);
-            println!("  - 未匹配的 Reads: {:>10} ({:.2}%)", counts.get("unmatched").unwrap_or(&0), unmatched_percent);
+            println!("  - Matched Reads:   {:>10} ({:.2}%)", matched_reads, matched_percent);
+            println!("  - Unmatched Reads: {:>10} ({:.2}%)", counts.get("unmatched").unwrap_or(&0), unmatched_percent);
             println!("--------------------------------------------------");
             let mut sorted_samples: Vec<_> = counts.into_iter().collect();
             sorted_samples.sort_by(|a, b| b.1.cmp(&a.1));
             for (sample, count) in sorted_samples {
                 if sample != "unmatched" {
                     let sample_percent = count as f64 * 100.0 / total_reads as f64;
-                    println!("  - 样本 {}: {:>10} reads ({:.2}%)", sample, count, sample_percent);
+                    println!("  - Sample {}: {:>10} reads ({:.2}%)", sample, count, sample_percent);
                 }
             }
         }
-        println!("============================================================");
-        println!("✔ 程序执行完毕! 结果已输出至: {}", output_dir.display());
+        println!("===================================================================================");
+        println!("✔ Done! Results written to: {}", output_dir.display());
     }
     pub fn run(args: Args) -> Result<()> {
         let start_time = Instant::now();
         let output_dir = args.output.clone();
         std::fs::create_dir_all(&output_dir)
-            .with_context(|| format!("无法创建输出目录: {:?}", output_dir))?;
-        println!("---> 正在加载标签...");
+            .with_context(|| format!("Failed to create output directory: {:?}", output_dir))?;
+        println!("---> Loading tags...");
         let (lookup_map, all_samples) = load_tags(&args.tags, args.tag_len)?;
         let lookup_map = Arc::new(lookup_map);
         let args_arc = Arc::new(args);
@@ -858,7 +827,7 @@ mod demux {
                 .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"])
                 .template("{spinner:.blue} [{elapsed_precise}] {msg} {pos:>10} reads")?,
         );
-        pb.set_message("正在处理...");
+        pb.set_message("Processing...");
         thread::scope(|s| -> Result<()> {
             let out_fasta_flag = args_arc.out_fasta;
             let output_dir_for_writer = output_dir.clone();
@@ -874,8 +843,8 @@ mod demux {
             reader_thread(args_arc.inputfile.clone(), raw_tx, pb)?;
             match writer_handle.join() {
                 Ok(Ok(counts)) => print_summary(counts, start_time, &output_dir),
-                Ok(Err(e)) => eprintln!("写入线程出错: {:?}", e),
-                Err(e) => eprintln!("写入线程发生Panic: {:?}", e),
+                Ok(Err(e)) => eprintln!("Writer thread error: {:?}", e),
+                Err(e) => eprintln!("Writer thread panicked: {:?}", e),
             }
             Ok(())
         })?;
@@ -884,7 +853,7 @@ mod demux {
 }
 
 // ==================================================================================
-// `stats` 子命令模块 (无变化)
+// `stats` subcommand module
 // ==================================================================================
 mod stats {
     use super::common::{detect_format, Format};
@@ -898,7 +867,7 @@ mod stats {
 
     #[derive(Parser, Debug)]
     pub struct Args {
-        #[arg(long, help = "一个或多个输入文件 (支持通配符, e.g., '*.fasta')", required = true, num_args = 1..)]
+        #[arg(long, help = "One or more input files (wildcards supported, e.g., '*.fasta')", required = true, num_args = 1..)]
         inputfile: Vec<PathBuf>,
     }
     
@@ -923,13 +892,13 @@ mod stats {
     
     fn print_stats_table(stats: &[FileStats]) {
         if stats.is_empty() {
-            println!("未处理任何文件或未找到任何序列。");
+            println!("No files processed or no sequences found.");
             return;
         }
 
-        println!("\n====================================== 序列统计汇总 ======================================");
+        println!("\n====================================== Sequence Statistics Summary ======================================");
         println!("{:<25} {:>15} {:>18} {:>10} {:>10} {:>12}",
-                 "样品名 (Sample)", "序列总数", "总碱基数", "最短长度", "最长长度", "平均长度");
+                 "Sample Name", "Total Seqs", "Total Bases", "Min Length", "Max Length", "Avg Length");
         println!("{:-<25} {:-<15} {:-<18} {:-<10} {:-<10} {:-<12}",
                  "", "", "", "", "", "");
 
@@ -942,14 +911,14 @@ mod stats {
             println!("{:<25} {:>15} {:>18} {:>10} {:>10} {:<12.2}",
                        s.filename, s.count, s.total_len, s.min_len, s.max_len, avg_len);
         }
-        println!("==========================================================================================");
+        println!("===================================================================================================");
     }
 
     pub fn run(args: Args) -> Result<()> {
         let mut all_stats: Vec<FileStats> = Vec::new();
 
         for input_path in &args.inputfile {
-            println!("---> 正在处理: {}", input_path.display());
+            println!("---> Processing: {}", input_path.display());
             let format = detect_format(input_path)?;
 
             let file = File::open(input_path)?;
@@ -1007,7 +976,7 @@ mod stats {
 }
 
 // ==================================================================================
-// `filter` 子命令模块 (无变化)
+// `filter` subcommand module
 // ==================================================================================
 mod filter {
     use super::common::{detect_format, Format};
@@ -1021,16 +990,16 @@ mod filter {
 
     #[derive(Parser, Debug)]
     pub struct Args {
-        #[arg(long, help = "一个或多个输入文件 (支持通配符, e.g., '*.fasta')", required = true, num_args = 1..)]
+        #[arg(long, help = "One or more input files (wildcards supported, e.g., '*.fasta')", required = true, num_args = 1..)]
         inputfile: Vec<PathBuf>,
 
-        #[arg(long, help = "输出文件 (默认: 标准输出)")]
+        #[arg(long, help = "Output file (default: standard output)")]
         outfile: Option<PathBuf>,
 
-        #[arg(short = 'm', long, help = "过滤掉小于该长度的序列")]
+        #[arg(short = 'm', long, help = "Filter out sequences shorter than this length")]
         min_len: Option<usize>,
         
-        #[arg(short = 'M', long, help = "过滤掉大于该长度的序列")]
+        #[arg(short = 'M', long, help = "Filter out sequences longer than this length")]
         max_len: Option<usize>,
     }
 
@@ -1086,7 +1055,7 @@ mod filter {
 }
 
 // ==================================================================================
-// `ns_count` 子命令模块 (已重写并简化)
+// `ns_count` subcommand module (Restored v0.5.1 anchor-based logic with syntax fix)
 // ==================================================================================
 mod ns_count {
     use anyhow::{Context, Result};
@@ -1094,7 +1063,7 @@ mod ns_count {
     use clap::Parser;
     use flate2::bufread::MultiGzDecoder;
     use indicatif::{ProgressBar, ProgressStyle};
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::fs::File;
     use std::io::{BufRead, BufReader};
     use std::path::PathBuf;
@@ -1105,23 +1074,23 @@ mod ns_count {
 
     #[derive(Parser, Debug)]
     pub struct Args {
-        #[arg(long, help = "包含待比对reads的FASTA文件 (可为.gz)")]
+        #[arg(long, help = "FASTA file containing reads to be aligned (can be gzipped)")]
         reads: PathBuf,
-        #[arg(long = "refSEQ", help = "包含带N区域参考序列的FASTA文件")]
+        #[arg(long = "refSEQ", help = "FASTA file containing the reference sequence with N-regions")]
         ref_seq: PathBuf,
-        #[arg(long, help = "存放输出CSV文件的目录")]
+        #[arg(long, help = "Output directory for CSV files")]
         output: PathBuf,
-        #[arg(long, help = "线程数", default_value_t = num_cpus::get_physical())]
+        #[arg(long, help = "Number of threads", default_value_t = num_cpus::get_physical())]
         threads: usize,
-        #[arg(long, help = "输出CSV文件中的列名前缀", default_value = "T0")]
+        #[arg(long, help = "Prefix for column headers in the output CSV", default_value = "T0")]
         group: String,
-        #[arg(long, help = "频率的小数位数", default_value_t = 2)]
+        #[arg(long, help = "Number of decimal places for frequency", default_value_t = 2)]
         dig: u8,
-        #[arg(long, help = "允许的最大错配数", default_value_t = 2)]
+        #[arg(long, help = "Maximum mismatches allowed in non-anchor regions", default_value_t = 2)]
         mismatches: usize,
-        #[arg(long, help = "Read需达到的相对于Ref的最小长度比例", default_value_t = 0.9)]
-        min_len_ratio: f64,
-        #[arg(long, help = "提取所有比对上的reads并输出到单独的FASTA文件")]
+        #[arg(long, help = "Length of the anchor region on each side of an N-block", default_value_t = 15)]
+        anchor_len: usize,
+        #[arg(long, help = "Extract all matching reads into a separate FASTA file")]
         extract_matches: bool,
     }
 
@@ -1136,6 +1105,7 @@ mod ns_count {
         seq: Vec<u8>,
         len: usize,
         n_blocks: Vec<(usize, usize)>,
+        anchor_indices: HashSet<usize>,
     }
 
     fn find_n_blocks(seq: &[u8]) -> Vec<(usize, usize)> {
@@ -1159,73 +1129,70 @@ mod ns_count {
         blocks
     }
 
-    // This is the completely rewritten, safer alignment function.
-    fn find_alignment(
-        read_seq: &[u8], 
-        ref_data: &RefData, 
-        max_mismatches: usize, 
-        min_len_ratio: f64,
-        is_rc_read: bool
-    ) -> Option<Vec<u8>> {
+    fn calculate_anchor_indices(n_blocks: &[(usize, usize)], ref_len: usize, anchor_len: usize) -> HashSet<usize> {
+        let mut indices = HashSet::new();
+        for &(start, len) in n_blocks {
+            let upstream_start = start.saturating_sub(anchor_len);
+            indices.extend(upstream_start..start);
+
+            let downstream_start = start + len;
+            let downstream_end = (downstream_start + anchor_len).min(ref_len);
+            indices.extend(downstream_start..downstream_end);
+        }
+        indices
+    }
+
+    fn find_alignment(read_seq: &[u8], ref_data: &RefData, args: &Arc<Args>, is_rc_read: bool) -> Option<Vec<u8>> {
         let read_len = read_seq.len();
         let ref_len = ref_data.len;
 
-        // Condition 1: Check if the read is long enough compared to the reference.
-        if (read_len as f64) < (ref_len as f64 * min_len_ratio) {
-            return None;
-        }
+        for ref_start in 0..=ref_len.saturating_sub(read_len) {
+            let overlap_len = read_len;
 
-        // Condition 2: A read can't be longer than the reference for a valid alignment.
-        // This is the CRITICAL fix that prevents underflow and subsequent panics.
-        if read_len > ref_len {
-            return None;
-        }
-
-        let mut best_mismatches = usize::MAX;
-        let mut best_ref_start: Option<usize> = None;
-
-        // Find the best alignment position by sliding the read over the reference.
-        for ref_start in 0..=(ref_len - read_len) {
-            let mut current_mismatches = 0;
-            for i in 0..read_len {
-                if read_seq[i] != ref_data.seq[ref_start + i] {
-                    current_mismatches += 1;
-                }
+            if !ref_data.n_blocks.iter().all(|(n_start, n_len)| 
+                *n_start >= ref_start && (*n_start + *n_len) <= (ref_start + overlap_len)
+            ) {
+                continue;
             }
-            if current_mismatches < best_mismatches {
-                best_mismatches = current_mismatches;
-                best_ref_start = Some(ref_start);
-            }
-        }
 
-        // If a potential best alignment was found and it's within the threshold...
-        if let Some(start_pos) = best_ref_start {
-            if best_mismatches <= max_mismatches {
-                // Condition 3: Check if this best alignment covers ALL N-blocks.
-                let mut all_n_blocks_covered = true;
-                for &(n_start, n_len) in &ref_data.n_blocks {
-                    if !(n_start >= start_pos && (n_start + n_len) <= (start_pos + read_len)) {
-                        all_n_blocks_covered = false;
+            let mut anchor_mismatch = false;
+            for &anchor_idx in &ref_data.anchor_indices {
+                if anchor_idx >= ref_start && anchor_idx < (ref_start + overlap_len) {
+                    let read_idx = anchor_idx - ref_start;
+                    if read_seq[read_idx] != ref_data.seq[anchor_idx] {
+                        anchor_mismatch = true;
                         break;
                     }
                 }
+            }
+            if anchor_mismatch { continue; }
 
-                if all_n_blocks_covered {
-                    let mut combo_parts = Vec::new();
-                    for &(n_start, n_len) in &ref_data.n_blocks {
-                        let read_idx_start = n_start - start_pos;
-                        let segment = &read_seq[read_idx_start .. read_idx_start + n_len];
-                        if is_rc_read {
-                            combo_parts.push(bio::alphabets::dna::revcomp(segment));
-                        } else {
-                            combo_parts.push(segment.to_vec());
-                        }
-                    }
-                    return Some(combo_parts.join(&b'-'));
+            let mut mismatches = 0;
+            for i in 0..overlap_len {
+                let ref_idx = ref_start + i;
+                if ref_data.anchor_indices.contains(&ref_idx) || ref_data.seq[ref_idx] == b'N' {
+                    continue;
+                }
+                let read_idx = i;
+                if read_seq[read_idx] != ref_data.seq[ref_idx] {
+                    mismatches += 1;
                 }
             }
+
+            if mismatches <= args.mismatches {
+                let mut combo_parts = Vec::new();
+                for &(n_start, n_len) in &ref_data.n_blocks {
+                    let read_idx_start = n_start - ref_start;
+                    let segment = &read_seq[read_idx_start..read_idx_start + n_len];
+                    if is_rc_read {
+                        combo_parts.push(bio::alphabets::dna::revcomp(segment));
+                    } else {
+                        combo_parts.push(segment.to_vec());
+                    }
+                }
+                return Some(combo_parts.join(&b'-'));
+            }
         }
-        
         None
     }
 
@@ -1269,7 +1236,7 @@ mod ns_count {
                     let freq = (*count as f64 / total as f64) * 100.0;
                     csv_writer.write_record(&[String::from_utf8_lossy(combo).to_string(), count.to_string(), format!("{:.1$}", freq, dig as usize)])?;
                 }
-                println!("[完成] {}: 共找到 {} 个匹配, {} 种独特组合。", ref_id, total, counter.len());
+                println!("[Done] {}: Found {} matches with {} unique combinations.", ref_id, total, counter.len());
             }
         }
 
@@ -1282,30 +1249,34 @@ mod ns_count {
 
     pub fn run(args: Args) -> Result<()> {
         std::fs::create_dir_all(&args.output)
-            .with_context(|| format!("无法创建输出目录: {:?}", args.output))?;
+            .with_context(|| format!("Failed to create output directory: {:?}", args.output))?;
         
         let ref_file = File::open(&args.ref_seq)?;
         let ref_reader = BufReader::new(ref_file);
         let ref_records: Vec<_> = fasta::Reader::new(ref_reader).records().collect::<Result<_,_>>()?;
         
+        let args_arc = Arc::new(args);
+
         let ref_data_vec: Vec<RefData> = ref_records.into_iter().filter_map(|rec| {
             let seq = rec.seq().to_ascii_uppercase();
             let n_blocks = find_n_blocks(&seq);
             if n_blocks.is_empty() {
-                println!("[跳过] {}: 参考序列中未找到 'N' 区块。", rec.id());
+                println!("[Skipping] {}: No 'N' blocks found in reference sequence.", rec.id());
                 return None;
             }
+            let anchor_indices = calculate_anchor_indices(&n_blocks, seq.len(), args_arc.anchor_len);
             Some(RefData {
                 id: rec.id().to_string(),
                 len: seq.len(),
                 seq,
                 n_blocks,
+                anchor_indices,
             })
         }).collect();
         
-        println!("---> 开始并行比对 {} 条有效参考序列...", ref_data_vec.len());
+        println!("---> Starting parallel alignment against {} valid reference(s)...", ref_data_vec.len());
         
-        rayon::ThreadPoolBuilder::new().num_threads(args.threads).build_global()?;
+        rayon::ThreadPoolBuilder::new().num_threads(args_arc.threads).build_global()?;
         
         let pb = ProgressBar::new_spinner();
         pb.enable_steady_tick(std::time::Duration::from_millis(120));
@@ -1314,9 +1285,8 @@ mod ns_count {
                 .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"])
                 .template("{spinner:.blue} [{elapsed_precise}] {msg} {pos:>10} reads")?,
         );
-        pb.set_message("正在读取reads...");
+        pb.set_message("Reading reads...");
 
-        let args_arc = Arc::new(args);
         let ref_data_arc = Arc::new(ref_data_vec);
 
         thread::scope(|s| -> Result<()> {
@@ -1342,16 +1312,16 @@ mod ns_count {
                             let read_seq = read_record.seq().to_ascii_uppercase();
                             if read_seq.contains(&b'N') { continue; }
 
-                            for ref_data in refs.iter() {
-                                if let Some(combo) = find_alignment(&read_seq, ref_data, args_clone.mismatches, args_clone.min_len_ratio, false) {
+                            'ref_loop: for ref_data in refs.iter() {
+                                if let Some(combo) = find_alignment(&read_seq, ref_data, &args_clone, false) {
                                     if tx.send(MatchResult { ref_id: ref_data.id.clone(), combo, read_record: read_record.clone() }).is_ok() {
-                                        break;
+                                        break 'ref_loop;
                                     }
                                 }
                                 let rc_read = bio::alphabets::dna::revcomp(&read_seq);
-                                if let Some(combo) = find_alignment(&rc_read, ref_data, args_clone.mismatches, args_clone.min_len_ratio, true) {
+                                if let Some(combo) = find_alignment(&rc_read, ref_data, &args_clone, true) {
                                      if tx.send(MatchResult { ref_id: ref_data.id.clone(), combo, read_record: read_record.clone() }).is_ok() {
-                                        break;
+                                        break 'ref_loop;
                                     }
                                 }
                             }
@@ -1384,13 +1354,13 @@ mod ns_count {
                 if reads_tx.send(chunk).is_err() { break; }
             }
             drop(reads_tx);
-            pb.finish_with_message("✔ reads读取完毕，等待比对完成...");
+            pb.finish_with_message("✔ Reads loaded, waiting for alignment to finish...");
 
             collector_handle.join().unwrap()?;
             Ok(())
         })?;
 
-        println!("\n✔ 所有比对任务已完成。");
+        println!("\n✔ All alignment tasks are complete.");
         Ok(())
     }
 }

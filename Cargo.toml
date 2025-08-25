@@ -4,12 +4,17 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+# 使用一个与您代码兼容的 bio 版本
 bio = "1.2.0"
-clap = { version = "4.5.7", features = ["derive"] }
-csv = "1.3.0"
-flate2 = "1.0.30"
-indicatif = "0.17.8"
-anyhow = "1.0.86"
-rayon = "1.10.0"
-crossbeam-channel = "0.5.13"
-num_cpus = "1.16.0"
+
+# 其他库使用最新版本即可，无需固定
+clap = { version = "4.5", features = ["derive"] }
+csv = "1.3"
+flate2 = "1.0"
+indicatif = "0.17"
+anyhow = "1.0"
+crossbeam-channel = "0.5"
+num_cpus = "1.16"
+
+# 您的编译器已经很新了，不再需要手动限制 rayon 版本
+rayon = "1"
