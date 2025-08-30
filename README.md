@@ -7,7 +7,7 @@ A versatile toolkit for FASTX file processing, including quality control, mergin
 `Hammer_fastx` is a Rust-based command-line tool designed for processing FASTA and FASTQ files. It provides a comprehensive set of subcommands for quality control, paired-end read merging, demultiplexing, sequence statistics, filtering, and alignment to references with ambiguous regions (N-regions). The tool leverages external dependencies like `fastp` and `flash2` for specific tasks and includes parallelized workflows for efficient processing.
 
 - **Version**: v1.2.0
-- **Author**: CZH with the help of Gemini
+- **Author**: CZH with the help of Gemini 2.5 pro
 - **License**: MIT (or specify your preferred license)
 
 ## Features
