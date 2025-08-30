@@ -1,154 +1,155 @@
 # Hammer_fastx
 
-> 用 Rust 语言编写的多功能 FASTA/FASTQ 文件处理工具
+A versatile toolkit for FASTX file processing, including quality control, merging, demultiplexing, and sequence analysis.
 
-## 项目简介
+## Overview
 
-Hammer_fastx 是一个用 Rust 开发的轻量级命令行工具，旨在高效处理生物信息学中的 FASTA 和 FASTQ 文件。适用于基因组测序数据的预处理、格式转换、质控、合并及拆分等场景。
+`Hammer_fastx` is a Rust-based command-line tool designed for processing FASTA and FASTQ files. It provides a comprehensive set of subcommands for quality control, paired-end read merging, demultiplexing, sequence statistics, filtering, and alignment to references with ambiguous regions (N-regions). The tool leverages external dependencies like `fastp` and `flash2` for specific tasks and includes parallelized workflows for efficient processing.
 
----
+- **Version**: v1.2.0
+- **Author**: CZH with the help of Gemini
+- **License**: MIT (or specify your preferred license)
 
-## 命令行参数与 `--help` 说明
+## Features
 
-运行以下命令可查看完整帮助信息：
+- **Workflows**:
+  - `demux_all`: Complete pipeline for quality control, merging, and demultiplexing.
+  - `mergePE`: Quality control and merging of paired-end reads with customizable output formats.
+- **Single-Step Commands**:
+  - `demux_only`: Demultiplex merged FASTQ files based on barcodes.
+  - `fastp`: Quality control for paired-end FASTQ files using `fastp`.
+  - `flash2`: Merge paired-end reads using `flash2`.
+  - `stats`: Generate sequence statistics for FASTA/FASTQ files.
+  - `filter`: Filter FASTA/FASTQ files based on sequence length.
+  - `Ns_count`: Align reads to a reference with N-regions using anchor-based logic.
+
+## Installation
+
+### Prerequisites
+
+- **Rust**: Ensure you have Rust installed (`cargo` is used for building).
+- **External Tools**:
+  - `fastp`: Required for quality control (`fastp` subcommand and workflows).
+  - `flash2`: Required for paired-end read merging (`flash2` subcommand and workflows).
+- Ensure both `fastp` and `flash2` are in your system's PATH.
+
+### Build from Source
+
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/your-username/hammer_fastx.git
+   cd hammer_fastx
+   ```
+
+2. Build the project:
+   ```bash
+   cargo build --release
+   ```
+
+3. Install the binary:
+   ```bash
+   cargo install --path .
+   ```
+
+The executable will be available as `Hammer_fastx`.
+
+## Usage
+
+Run `Hammer_fastx --help` to see all available subcommands and options.
 
 ```bash
-./hammer_fastx --help
-```
-
-主要输出格式示例（不同版本略有差异）：
-
-```
-Hammer_fastx v0.7.1
+Hammer_fastx v1.2.0
 CZH with the help of Gemini
-一个用于处理FASTX文件、集成质控和合并功能的多功能工具集
+A versatile toolkit for FASTX file processing, including QC, merging, and demultiplexing.
 
 USAGE:
-    hammer_fastx <SUBCOMMAND>
-
-OPTIONS:
-    -h, --help       打印帮助信息
-    -V, --version    打印版本号
+    Hammer_fastx [SUBCOMMAND]
 
 SUBCOMMANDS:
-    demux_all    [主流程] 运行从质控、合并到拆分的完整流程
-    mergePE      [流程] 先质控后合并双端数据，可选择输出格式
-    demux_only   [单步骤] 仅根据barcode拆分已合并的FASTQ文件
-    Fastp        (包装器) 使用 fastp 对双端fastq文件进行质控
-    Flash2       (包装器) 使用 flash2 合并双端 reads
-    Stats        统计一个或多个FASTA/FASTQ文件中的序列信息
-    Filter       根据序列长度过滤一个或多个FASTA/FASTQ文件
-    Ns_count     将reads比对到含有N的参考序列上并提取组合
+    demux_all    Run the complete pipeline from QC and merging to demultiplexing
+    mergePE      Quality control and merge paired-end data, with optional output formats
+    demux_only   Demultiplex a merged FASTQ file based on barcodes
+    fastp        Quality control paired-end FASTQ files using fastp
+    flash2       Merge paired-end reads using flash2
+    stats        Get sequence statistics from one or more FASTA/FASTQ files
+    filter       Filter one or more FASTA/FASTQ files based on sequence length
+    Ns_count     Align reads to a reference with Ns using a strict anchor-based method
 ```
 
----
+### Example Commands
 
-## 子命令与功能详细说明
+1. **Run the full demultiplexing pipeline**:
+   ```bash
+   Hammer_fastx demux_all -i read1.fastq.gz -I read2.fastq.gz --tags samples.csv -o output_dir --fastp-threads 8 --flash-threads 8 --demux-threads 8
+   ```
 
-### 1. demux_all
-**[主流程] 一键运行质控(fastp)、合并(flash2)、barcode拆分**
+2. **Merge paired-end reads**:
+   ```bash
+   Hammer_fastx mergePE -i read1.fastq.gz -I read2.fastq.gz -o merged.fastq --out-fasta --fastp-threads 4
+   ```
 
-- 输入：成对的原始双端 fastq 文件、barcode 文件等
-- 步骤：依次调用 fastp 进行质控、flash2 合并 reads、barcode 拆分
-- 常用参数：
-    - `--in1`/`--in2`：输入的 R1/R2 fastq 文件
-    - `--barcode`：barcode 文件
-    - `--outdir`：输出目录
-    - `--fastp-threads`：fastp 线程数
-    - `--out-fasta`：输出为 FASTA 格式（默认 FASTQ）
+3. **Demultiplex a merged FASTQ file**:
+   ```bash
+   Hammer_fastx demux_only --inputfile merged.fastq --output demux_out --tags samples.csv --threads 16 --trim
+   ```
 
-### 2. mergePE
-**[流程] 先用 fastp 质控，再用 flash2 合并双端数据，适于 PE 数据的融合处理**
+4. **Generate sequence statistics**:
+   ```bash
+   Hammer_fastx stats --inputfile sample1.fasta sample2.fastq
+   ```
 
-- 主要参数同上（具体参数可通过 `mergePE --help` 查看）
+5. **Filter sequences by length**:
+   ```bash
+   Hammer_fastx filter --inputfile input.fasta --outfile filtered.fasta --min-len 100 --max-len 1000
+   ```
 
-### 3. demux_only
-**[单步骤] 仅基于 barcode 对已合并 fastq 文件进行拆分**
+6. **Align reads to a reference with N-regions**:
+   ```bash
+   Hammer_fastx Ns_count --reads reads.fasta --refSEQ reference.fasta --output results --threads 8 --mismatches 2
+   ```
 
-- 用于合并后数据的快速 barcode 拆分
-- 主要参数：
-    - `--infile`：合并后的 fastq 文件
-    - `--barcode`：barcode 文件
-    - `--outdir`：结果输出目录
+## Input/Output Formats
 
-### 4. Fastp
-**调用 fastp 对双端 fastq 文件进行质控**
+- **Input**: Supports FASTA and FASTQ files, including gzipped files.
+- **Output**:
+  - Workflows and demultiplexing: FASTQ (default) or FASTA (optional).
+  - Statistics: Tabular summary printed to the console.
+  - Filtering: FASTA/FASTQ output to file or stdout.
+  - Ns_count: CSV files with combination counts and optional FASTA files for matching reads.
 
-- 实际为外部 fastp 工具的包装，适用于高效过滤与质量统计
-- 常用参数：
-    - `-i/--in1`：输入文件1 (Read1)
-    - `-I/--in2`：输入文件2 (Read2)
-    - `-o/--out1`：输出文件1 (Read1)
-    - `-O/--out2`：输出文件2 (Read2)
-    - `-h/--html`：指定 HTML 报告输出路径
-    - `-j/--json`：指定 JSON 报告输出路径
-    - `-R/--report-title`：报告标题
-    - `-t/--threads`：线程数
+### Tag File Format (for `demux_only` and `demux_all`)
 
-### 5. Flash2
-**调用 flash2 合并双端 reads**
+The tag file for demultiplexing must be a CSV with the following columns:
+- `SampleID`: Unique identifier for the sample.
+- `F_tag`: Forward tag sequence.
+- `R_tag`: Reverse tag sequence.
 
-- 合并 PE reads，提升拼接效率
-- 参数详见 `Flash2 --help`
-
-### 6. Stats
-**统计FASTA/FASTQ文件中的序列信息**
-
-- 包括序列条数、总碱基数、平均长度等
-- 输入支持多个文件
-
-### 7. Filter
-**根据序列长度过滤FASTA/FASTQ文件**
-
-- 可自定义最小/最大长度阈值
-
-### 8. Ns_count
-**将 reads 比对到含 N 的参考序列并提取组合**
-
-- 适合特殊定制需求
-
----
-
-## 使用示例
-
-```bash
-# 查看帮助
-./hammer_fastx --help
-
-# 统计序列文件信息
-./hammer_fastx Stats -i example.fasta
-
-# fastq 转换为 fasta（如有支持）
-./hammer_fastx fq2fa -i example.fastq -o output.fasta
-
-# 一键处理流程
-./hammer_fastx demux_all --in1 R1.fq.gz --in2 R2.fq.gz --barcode barcodes.txt --outdir result_dir
+Example (`samples.csv`):
+```csv
+SampleID,F_tag,R_tag
+sample1,ACGTACGT,TGCACTGC
+sample2,GGTTCCAA,CCATGGTT
 ```
 
----
+## Dependencies
 
-## 输入输出格式
+- **Rust Crates**:
+  - `anyhow`: Error handling.
+  - `clap`: Command-line argument parsing.
+  - `bio`: FASTA/FASTQ parsing and DNA sequence utilities.
+  - `flate2`: Gzip file handling.
+  - `indicatif`: Progress bars.
+  - `rayon`: Parallel processing.
+  - `crossbeam-channel`: Thread-safe communication.
+  - `csv`: CSV file handling.
+- **External Tools**:
+  - `fastp`: For quality control.
+  - `flash2`: For paired-end read merging.
 
-- **输入**：支持标准 FASTA (.fasta, .fa) 与 FASTQ (.fastq, .fq) 文件
-- **输出**：支持 FASTA/FASTQ，或统计、质控、合并、拆分等中间结果
+## Contributing
 
----
+Contributions are welcome! Please submit issues or pull requests to the GitHub repository. Ensure your code follows the project's coding style and includes appropriate tests.
 
-## 依赖环境
+## License
 
-- Rust 1.60 及以上
-- 需依赖外部工具 fastp、flash2（部分子命令）
-
----
-
-## 贡献与反馈
-
-欢迎 issue 与 PR！如有建议或 bug 可在 [GitHub Issues](https://github.com/Caizhaohui/Hammer_fastx/issues) 提出。
-
-## 许可证
-
-MIT License，详见 [LICENSE](./LICENSE)。
-
----
-
-**作者**：[Caizhaohui](https://github.com/Caizhaohui)
+This project is licensed under the MIT License. See the `LICENSE` file for details.
