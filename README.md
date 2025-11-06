@@ -1,4 +1,4 @@
-# Hammer_fastx
+[# Hammer_fastx
 
 A versatile toolkit for FASTX file processing, including quality control, merging, demultiplexing, and sequence analysis.
 
@@ -153,3 +153,4 @@ Contributions are welcome! Please submit issues or pull requests to the GitHub r
 ## License
 
 This project is licensed under the MIT License. See the `LICENSE` file for details.
+](https://zread.ai/Caizhaohui/Hammer_fastx)
