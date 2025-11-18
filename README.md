@@ -36,6 +36,8 @@ cp target/release/hammer_fastx /usr/local/bin/
 
 ### 外部依赖
 
+### 1. 完整工作流示例
+
 ```bash
 # fastp（建议使用 conda）
 conda install -c bioconda fastp
@@ -238,7 +240,91 @@ NAAATGCCTT,NAA,CTT,1
 NAAATGCTTT,NAA,TTT,1
 ```
 
----
+### 2. 分步处理示例
+
+```bash
+# 步骤1: 使用Fastp进行质控
+hammer_fastx Fastp \
+    --in1 raw_data/sample_R1.fastq.gz \
+    --in2 raw_data/sample_R2.fastq.gz \
+    --out1 clean_data/sample_R1.clean.fq.gz \
+    --out2 clean_data/sample_R2.clean.fq.gz \
+    --html reports/fastp_report.html \
+    --json reports/fastp_report.json \
+    --threads 8
+
+# 步骤2: 使用Flash2合并质控后的双端数据
+hammer_fastx Flash2 \
+    --in1 clean_data/sample_R1.clean.fq.gz \
+    --in2 clean_data/sample_R2.clean.fq.gz \
+    --out merged/sample \
+    --threads 8
+
+# 步骤3: 使用demux_only拆分合并的数据
+hammer_fastx demux_only \
+    --infile merged/sample.extendedFrags.fastq \
+    --barcode barcodes.txt \
+    --outdir demultiplexed \
+    --threads 12
+```
+
+### 3. 统计分析示例
+
+```bash
+# 统计序列文件信息
+hammer_fastx Stats \
+    --input demultiplexed/*.fasta \
+    --output stats.csv
+
+# 根据序列长度过滤文件
+hammer_fastx Filter \
+    --input demultiplexed \
+    --output filtered \
+    --min-length 200 \
+    --max-length 1000 \
+    --threads 8
+```
+
+### 4. 新增功能使用示例
+
+```bash
+# DNA 转氨基酸序列
+hammer_fastx dna2aa \
+    --input dna_sequences/ \
+    --output protein_sequences/ \
+    --aa-length 100
+
+# 氨基酸突变统计
+hammer_fastx count_aa \
+    --reference reference_protein.fasta \
+    --input-dir protein_sequences/ \
+    --output-dir mutation_stats/ \
+    --aa-offset 1 \
+    --config protected_sites.csv \
+    --threads 12 \
+    --chunk_size 500000
+```
+
+### 5. 常见任务组合示例
+
+```bash
+# 批量处理多个样本的完整流程
+for sample in sampleA sampleB sampleC; do
+    hammer_fastx demux_all \
+        --in1 raw_data/${sample}_R1.fastq.gz \
+        --in2 raw_data/${sample}_R2.fastq.gz \
+        --barcode barcodes.txt \
+        --outdir results/${sample} \
+        --threads 8
+        
+    echo "处理完成: $sample"
+done
+
+# 对处理后的样本进行统计分析
+hammer_fastx Stats \
+    --input results/*/*.fasta \
+    > all_samples_stats.txt
+```
 
 ## 输入/输出格式示例
 
@@ -283,7 +369,10 @@ S12A,34,0.12
 P55L,5,0.02
 ```
 
----
+- **FASTA 格式**：`.fasta`, `.fa`, `.fna`
+- **FASTQ 格式**：`.fastq`, `.fq`
+- **压缩格式**：支持 `.gz` 压缩的 FASTA/FASTQ 文件
+- **Barcode 文件**：制表符分隔的文本文件，格式：`barcode\t样本名`
 
 ## 依赖与优化建议
 
@@ -304,6 +393,6 @@ P55L,5,0.02
 
 - Caizhaohui（GitHub: https://github.com/Caizhaohui）
 
----
+## 依赖说明
 
 Hammer_fastx - 让生物信息学数据分析更加高效！
