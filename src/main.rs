@@ -3,13 +3,21 @@ use clap::Parser;
 use std::process::{Command, Stdio}; // For executing external commands
 
 // ==================================================================================
+// 模块声明 (Module declarations) - 已被移除
+//
+// (原第 8-17 行的 "mod pipeline;", "mod merge_pe;" 等已被删除，
+// 因为所有模块都已在下方本文件中定义。)
+//
+// ==================================================================================
+
+// ==================================================================================
 // Main entry point and CLI command definitions
 // ==================================================================================
 
 #[derive(Parser, Debug)]
 #[command(
     name = "Hammer_fastx",
-    version = "v1.2.0", // Hybrid: Modern codebase with classic anchor-based Ns_count logic
+    version = "v1.2.2", // Hybrid: Modern codebase with classic anchor-based Ns_count logic
     author = "CZH with the help of Gemini",
     about = "A versatile toolkit for FASTX file processing, including QC, merging, and demultiplexing."
 )]
@@ -19,7 +27,7 @@ struct Cli {
 }
 
 #[derive(Parser, Debug)]
-enum Commands {
+enum Commands{
     /// [Workflow] Run the complete pipeline from QC and merging to demultiplexing
     #[command(name = "demux_all")]
     DemuxAll(pipeline::Args),
@@ -47,9 +55,22 @@ enum Commands {
     /// [Anchor Logic] Align reads to a reference with Ns using a strict anchor-based method
     #[command(name = "Ns_count")]
     NsCount(ns_count::Args),
+
+    /// Translate DNA FASTA files to Amino Acid FASTA files
+    #[command(name = "DNA2AA")]
+    DNA2AA(dna2aa::Args),
+
+    /// [NEW] Count Amino Acid mutations against a reference protein sequence
+    #[command(name = "count_AA")]
+    CountAA(count_aa::Args), // <-- 新添加的命令
+
+    /// Find motif occurrences and extract flanks; counts unique per-read windows; supports reverse complement
+    #[command(name = "find_seq", about = "Find motif occurrences and extract flanks; counts unique per-read windows; supports reverse complement")]
+    FindSeq(find_seq::Args),
 }
 
 fn main() -> Result<()> {
+    // FIX: Changed Cli.parse() to Cli::parse()
     let cli = Cli::parse();
 
     match cli.command {
@@ -61,6 +82,9 @@ fn main() -> Result<()> {
         Commands::Stats(args) => stats::run(args),
         Commands::Filter(args) => filter::run(args),
         Commands::NsCount(args) => ns_count::run(args),
+        Commands::DNA2AA(args) => dna2aa::run(args),
+        Commands::CountAA(args) => count_aa::run(args),
+        Commands::FindSeq(args) => find_seq::run(args), // <-- 新添加的分支
     }
 }
 
@@ -392,10 +416,10 @@ mod fastp {
 
         if status.success() {
             println!("\n✔ fastp quality control completed successfully!");
-            println!("    - Cleaned R1: {}", args.out1.display());
-            println!("    - Cleaned R2: {}", args.out2.display());
+            println!("   - Cleaned R1: {}", args.out1.display());
+            println!("   - Cleaned R2: {}", args.out2.display());
             if let Some(html_path) = &args.html {
-                println!("    - HTML Report: {}", html_path.display());
+                println!("   - HTML Report: {}", html_path.display());
             }
             Ok(())
         } else {
@@ -445,21 +469,13 @@ mod flash2 {
     }
     
     fn command_exists(cmd: &str) -> bool {
-        if cfg!(unix) {
-            Command::new("which")
-                .arg(cmd)
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .map_or(false, |s| s.success())
-        } else {
-            Command::new("where")
-                .arg(cmd)
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .map_or(false, |s| s.success())
-        }
+        // Use the same robust check as the 'fastp' module
+        Command::new(cmd)
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok()
     }
 
     pub fn run(args: Args) -> Result<()> {
@@ -488,9 +504,9 @@ mod flash2 {
 
         if status.success() {
             println!("\n✔ flash2 merging completed successfully!");
-            println!("    - Output directory: {}", args.out_dir.display());
-            println!("    - Output prefix: {}", args.out_prefix);
-            println!("    - Merged file: {}", args.out_dir.join(format!("{}.extendedFrags.fastq", args.out_prefix)).display());
+            println!("   - Output directory: {}", args.out_dir.display());
+            println!("   - Output prefix: {}", args.out_prefix);
+            println!("   - Merged file: {}", args.out_dir.join(format!("{}.extendedFrags.fastq", args.out_prefix)).display());
             Ok(())
         } else {
             Err(anyhow!(
@@ -511,6 +527,7 @@ mod common {
     use std::io::{BufRead, BufReader, Read};
     use std::path::Path;
 
+    #[derive(Debug, PartialEq, Eq)]
     pub enum Format {
         Fasta,
         Fastq,
@@ -652,11 +669,14 @@ mod demux {
             }
             all_samples.insert(sample_id.clone());
             let r_tag_rc = bio::alphabets::dna::revcomp(&r_tag);
+
+            // Forward key: 5'-[F_tag]...[R_tag_rc]-3'
             let fwd_key = (f_tag.clone(), r_tag_rc.clone());
             lookup_map.insert(fwd_key, MatchInfo { sample_id: sample_id.clone(), orientation: Orientation::Forward });
             
-            let f_tag_rc = bio::alphabets::dna::revcomp(&f_tag);
-            let rev_key = (r_tag_rc, f_tag_rc);
+            // Reverse key: 5'-[R_tag_rc]...[F_tag]-3'
+            // FIX: The original code used f_tag_rc here, which was incorrect.
+            let rev_key = (r_tag_rc, f_tag);
             lookup_map.insert(rev_key, MatchInfo { sample_id, orientation: Orientation::Reverse });
         }
         Ok((lookup_map, all_samples))
@@ -695,35 +715,17 @@ mod demux {
         pb.finish_with_message("✔ File reading complete");
         Ok(())
     }
-    fn worker_thread(
-        rx_raw: crossbeam_channel::Receiver<RawChunk>,
-        tx_processed: crossbeam_channel::Sender<ProcessedChunk>,
-        lookup_map: Arc<HashMap<(Vec<u8>, Vec<u8>), MatchInfo>>,
-        args: Arc<Args>,
-    ) -> Result<()> {
-        rx_raw.into_iter().par_bridge().for_each(|chunk| {
-            let processed_results: Vec<(String, Record)> = chunk
-                .into_par_iter()
-                .filter_map(|record| process_record(&record, &lookup_map, &args))
-                .collect();
-            let mut processed_chunk: ProcessedChunk = HashMap::new();
-            for (sample_id, record) in processed_results {
-                processed_chunk.entry(sample_id).or_default().push(record);
-            }
-            if !processed_chunk.is_empty() {
-                let _ = tx_processed.send(processed_chunk);
-            }
-        });
-        Ok(())
-    }
-    fn process_record<'a>(
-        record: &'a Record,
-        lookup_map: &'a HashMap<(Vec<u8>, Vec<u8>), MatchInfo>,
-        args: &'a Args,
-    ) -> Option<(String, Record)> {
+
+    // This worker function processes a record
+    // MODIFIED: Takes ownership of Record to avoid clones
+    fn process_record(
+        record: Record, // Takes ownership
+        lookup_map: &HashMap<(Vec<u8>, Vec<u8>), MatchInfo>,
+        args: &Args,
+    ) -> (String, Record) { // Returns tuple, not Option
         let seq = record.seq();
         if seq.len() < args.tag_len * 2 {
-            return Some(("unmatched".to_string(), record.clone()));
+            return ("unmatched".to_string(), record); // Move record
         }
         let read_start = seq[..args.tag_len].to_ascii_uppercase();
         let read_end = seq[seq.len() - args.tag_len..].to_ascii_uppercase();
@@ -742,13 +744,14 @@ mod demux {
                         Record::with_attrs(record.id(), record.desc(), trimmed_seq, trimmed_qual)
                     }
                 } else {
-                    record.clone()
+                    record // Move record
                 };
-                Some((match_info.sample_id.clone(), final_record))
+                (match_info.sample_id.clone(), final_record)
             }
-            None => Some(("unmatched".to_string(), record.clone())),
+            None => ("unmatched".to_string(), record), // Move record
         }
     }
+
     fn writer_thread(
         rx_processed: crossbeam_channel::Receiver<ProcessedChunk>,
         output_dir: PathBuf,
@@ -793,7 +796,7 @@ mod demux {
         if total_reads > 0 {
             let matched_percent = matched_reads as f64 * 100.0 / total_reads as f64;
             let unmatched_percent = *counts.get("unmatched").unwrap_or(&0) as f64 * 100.0 / total_reads as f64;
-            println!("  - Matched Reads:   {:>10} ({:.2}%)", matched_reads, matched_percent);
+            println!("  - Matched Reads:       {:>10} ({:.2}%)", matched_reads, matched_percent);
             println!("  - Unmatched Reads: {:>10} ({:.2}%)", counts.get("unmatched").unwrap_or(&0), unmatched_percent);
             println!("--------------------------------------------------");
             let mut sorted_samples: Vec<_> = counts.into_iter().collect();
@@ -808,43 +811,88 @@ mod demux {
         println!("===================================================================================");
         println!("✔ Done! Results written to: {}", output_dir.display());
     }
+
+    // Optimization: This function combines the original worker_thread and the rayon::par_bridge logic
+    fn parallel_processing(
+        rx_raw: crossbeam_channel::Receiver<RawChunk>,
+        tx_processed: crossbeam_channel::Sender<ProcessedChunk>,
+        lookup_map: Arc<HashMap<(Vec<u8>, Vec<u8>), MatchInfo>>,
+        args: Arc<Args>,
+    ) {
+        // Use rayon's par_bridge to consume chunks from the channel in parallel
+        rx_raw.into_iter().par_bridge().for_each(|chunk| {
+            let processed_results: Vec<(String, Record)> = chunk
+                .into_par_iter() // Process records within the chunk in parallel (moves records)
+                .map(|record| process_record(record, &lookup_map, &args)) // Use map
+                .collect();
+            
+            let mut processed_chunk: ProcessedChunk = HashMap::new();
+            for (sample_id, record) in processed_results {
+                processed_chunk.entry(sample_id).or_default().push(record);
+            }
+
+            if !processed_chunk.is_empty() {
+                let _ = tx_processed.send(processed_chunk);
+            }
+        });
+    }
+
     pub fn run(args: Args) -> Result<()> {
         let start_time = Instant::now();
         let output_dir = args.output.clone();
         std::fs::create_dir_all(&output_dir)
             .with_context(|| format!("Failed to create output directory: {:?}", output_dir))?;
+        
         println!("---> Loading tags...");
         let (lookup_map, all_samples) = load_tags(&args.tags, args.tag_len)?;
         let lookup_map = Arc::new(lookup_map);
         let args_arc = Arc::new(args);
+        
+        // Configure rayon thread pool
+        rayon::ThreadPoolBuilder::new().num_threads(args_arc.threads).build_global()?;
+
         let channel_capacity = args_arc.threads * 2;
         let (raw_tx, raw_rx) = crossbeam_channel::bounded::<RawChunk>(channel_capacity);
         let (processed_tx, processed_rx) = crossbeam_channel::bounded::<ProcessedChunk>(channel_capacity);
+        
         let pb = ProgressBar::new_spinner();
         pb.enable_steady_tick(std::time::Duration::from_millis(120));
         pb.set_style(
             ProgressStyle::default_spinner()
-                .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"])
+                .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "a"])
                 .template("{spinner:.blue} [{elapsed_precise}] {msg} {pos:>10} reads")?,
         );
         pb.set_message("Processing...");
+
         thread::scope(|s| -> Result<()> {
             let out_fasta_flag = args_arc.out_fasta;
             let output_dir_for_writer = output_dir.clone();
+
+            // 1. Writer Thread
             let writer_handle = s.spawn(move || {
                 writer_thread(processed_rx, output_dir_for_writer, all_samples, out_fasta_flag)
             });
-            for _ in 0..args_arc.threads {
-                let (rx_raw, tx_processed) = (raw_rx.clone(), processed_tx.clone());
-                let (lookup_map_clone, args_clone) = (lookup_map.clone(), Arc::clone(&args_arc));
-                s.spawn(move || worker_thread(rx_raw, tx_processed, lookup_map_clone, args_clone));
+
+            // 2. Parallel Processing (consuming from raw_rx, sending to processed_tx)
+            let (lookup_clone, args_clone) = (lookup_map.clone(), args_arc.clone());
+            let processing_handle = s.spawn(move || {
+                parallel_processing(raw_rx, processed_tx, lookup_clone, args_clone);
+            });
+
+            // 3. Reader Thread (Main thread role, feeds raw_tx)
+            // This will block until reading is done, then drop raw_tx
+            let reader_res = reader_thread(args_arc.inputfile.clone(), raw_tx, pb);
+            if let Err(e) = reader_res {
+                eprintln!("Error in reader thread: {:?}", e);
             }
-            drop(processed_tx);
-            reader_thread(args_arc.inputfile.clone(), raw_tx, pb)?;
-            match writer_handle.join() {
-                Ok(Ok(counts)) => print_summary(counts, start_time, &output_dir),
-                Ok(Err(e)) => eprintln!("Writer thread error: {:?}", e),
-                Err(e) => eprintln!("Writer thread panicked: {:?}", e),
+
+            // Wait for processing to finish
+            processing_handle.join().unwrap(); 
+
+            // Wait for writer to finish
+            match writer_handle.join().unwrap() {
+                Ok(counts) => print_summary(counts, start_time, &output_dir),
+                Err(e) => eprintln!("Writer thread error: {:?}", e),
             }
             Ok(())
         })?;
@@ -880,14 +928,28 @@ mod stats {
     }
 
     fn get_sample_name(path: &Path) -> String {
-        path.file_name()
+        let filename = path.file_name()
             .unwrap_or_default()
             .to_str()
+            .unwrap_or_default();
+
+        // Try to handle .fastq.gz, .fa.gz etc.
+        let stem1 = Path::new(filename)
+            .file_stem()
             .unwrap_or_default()
-            .split('.')
-            .next()
-            .unwrap_or("")
-            .to_string()
+            .to_str()
+            .unwrap_or_default();
+        
+        if stem1.ends_with(".fastq") || stem1.ends_with(".fa") || stem1.ends_with(".fasta") || stem1.ends_with(".fq") {
+             Path::new(stem1)
+                .file_stem()
+                .unwrap_or_default()
+                .to_str()
+                .unwrap_or_default()
+                .to_string()
+        } else {
+            stem1.to_string()
+        }
     }
     
     fn print_stats_table(stats: &[FileStats]) {
@@ -897,9 +959,9 @@ mod stats {
         }
 
         println!("\n====================================== Sequence Statistics Summary ======================================");
-        println!("{:<25} {:>15} {:>18} {:>10} {:>10} {:>12}",
+        println!("{:<30} {:>15} {:>18} {:>10} {:>10} {:>12}",
                  "Sample Name", "Total Seqs", "Total Bases", "Min Length", "Max Length", "Avg Length");
-        println!("{:-<25} {:-<15} {:-<18} {:-<10} {:-<10} {:-<12}",
+        println!("{:-<30} {:-<15} {:-<18} {:-<10} {:-<10} {:-<12}",
                  "", "", "", "", "", "");
 
         for s in stats {
@@ -908,8 +970,8 @@ mod stats {
             } else {
                 0.0
             };
-            println!("{:<25} {:>15} {:>18} {:>10} {:>10} {:<12.2}",
-                       s.filename, s.count, s.total_len, s.min_len, s.max_len, avg_len);
+            println!("{:<30} {:>15} {:>18} {:>10} {:>10} {:<12.2}",
+                     s.filename, s.count, s.total_len, s.min_len, s.max_len, avg_len);
         }
         println!("===================================================================================================");
     }
@@ -976,25 +1038,37 @@ mod stats {
 }
 
 // ==================================================================================
-// `filter` subcommand module
+// `filter` subcommand module (MODIFIED FOR BATCH PROCESSING)
 // ==================================================================================
 mod filter {
     use super::common::{detect_format, Format};
-    use anyhow::Result;
+    use anyhow::{anyhow, Context, Result};
     use bio::io::{fasta, fastq};
     use clap::Parser;
     use flate2::bufread::MultiGzDecoder;
-    use std::fs::File;
+    use std::fs::{self, File};
     use std::io::{self, BufRead, BufReader, BufWriter, Write};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     #[derive(Parser, Debug)]
+    #[command(name = "filter", about = "Filter FASTA/FASTQ files by length, either individually or in batches.")]
+    #[clap(group(
+        clap::ArgGroup::new("input_mode")
+            .required(true)
+            .args(["input_files", "input_dir"]),
+    ))]
     pub struct Args {
-        #[arg(long, help = "One or more input files (wildcards supported, e.g., '*.fasta')", required = true, num_args = 1..)]
-        inputfile: Vec<PathBuf>,
+        #[arg(long, help = "One or more input files to concatenate and filter", num_args = 1..)]
+        input_files: Vec<PathBuf>,
 
-        #[arg(long, help = "Output file (default: standard output)")]
+        #[arg(long, help = "Input directory to batch process files")]
+        input_dir: Option<PathBuf>,
+
+        #[arg(long, help = "Output file (default: stdout, used with --input-files)")]
         outfile: Option<PathBuf>,
+
+        #[arg(long, help = "Output directory (required with --input-dir)")]
+        output_dir: Option<PathBuf>,
 
         #[arg(short = 'm', long, help = "Filter out sequences shorter than this length")]
         min_len: Option<usize>,
@@ -1003,53 +1077,198 @@ mod filter {
         max_len: Option<usize>,
     }
 
-    pub fn run(args: Args) -> Result<()> {
-        let min_len = args.min_len.unwrap_or(0);
-        let max_len = args.max_len.unwrap_or(usize::MAX);
-
-        let mut writer: Box<dyn Write> = if let Some(path) = args.outfile {
-            Box::new(BufWriter::new(File::create(path)?))
-        } else {
-            Box::new(BufWriter::new(io::stdout().lock()))
-        };
-
-        for input_path in &args.inputfile {
-            let format = detect_format(input_path)?;
-            
-            let file = File::open(input_path)?;
-            let buf_reader = BufReader::new(file);
-            let input_reader: Box<dyn BufRead> =
-                if input_path.extension().map_or(false, |ext| ext == "gz") {
-                    Box::new(BufReader::new(MultiGzDecoder::new(buf_reader)))
-                } else {
-                    Box::new(buf_reader)
-                };
-
-            match format {
-                Format::Fasta => {
-                    let reader = fasta::Reader::new(input_reader);
-                    let mut fasta_writer = fasta::Writer::new(&mut writer);
-                    for result in reader.records() {
-                        let record = result?;
-                        let len = record.seq().len();
-                        if len >= min_len && len <= max_len {
-                            fasta_writer.write_record(&record)?;
-                        }
+    /// Helper function to process a single stream (file)
+    fn process_file_stream(
+        input_reader: Box<dyn BufRead>,
+        writer: &mut Box<dyn Write>,
+        format: &Format,
+        min_len: usize,
+        max_len: usize,
+    ) -> Result<u64> { // Returns count of records written
+        let mut records_written = 0;
+        match format {
+            Format::Fasta => {
+                let reader = fasta::Reader::new(input_reader);
+                let mut fasta_writer = fasta::Writer::new(writer);
+                for result in reader.records() {
+                    let record = result?;
+                    let len = record.seq().len();
+                    if len >= min_len && len <= max_len {
+                        fasta_writer.write_record(&record)?;
+                        records_written += 1;
                     }
                 }
-                Format::Fastq => {
-                    let reader = fastq::Reader::new(input_reader);
-                    let mut fastq_writer = fastq::Writer::new(&mut writer);
-                    for result in reader.records() {
-                        let record = result?;
-                        let len = record.seq().len();
-                        if len >= min_len && len <= max_len {
-                            fastq_writer.write_record(&record)?;
-                        }
+            }
+            Format::Fastq => {
+                let reader = fastq::Reader::new(input_reader);
+                let mut fastq_writer = fastq::Writer::new(writer);
+                for result in reader.records() {
+                    let record = result?;
+                    let len = record.seq().len();
+                    if len >= min_len && len <= max_len {
+                        fastq_writer.write_record(&record)?;
+                        records_written += 1;
                     }
                 }
             }
         }
+        Ok(records_written)
+    }
+
+    /// Generates the output filename with `_filtered` suffix
+    fn get_output_filename(input_path: &Path) -> Result<(String, bool)> {
+        let file_name = input_path.file_name()
+            .ok_or_else(|| anyhow!("Failed to get file name from path: {:?}", input_path))?
+            .to_str()
+            .ok_or_else(|| anyhow!("File name contains invalid UTF-8: {:?}", input_path))?;
+
+        let (stem, extension) = match file_name.rfind('.') {
+            Some(dot_pos) => (&file_name[..dot_pos], &file_name[dot_pos..]),
+            None => (file_name, "")
+        };
+        
+        let (real_stem, real_ext, is_gz) = if extension == ".gz" {
+             if let Some(dot_pos) = stem.rfind('.') {
+                 // e.g., ("input", ".fastq", true) from "input.fastq.gz"
+                 (&stem[..dot_pos], &stem[dot_pos..], true)
+             } else {
+                 // e.g., ("archive", "", true) from "archive.gz"
+                 (stem, "", true)
+             }
+        } else {
+            // e.g., ("input", ".fasta", false) from "input.fasta"
+            (stem, extension, false)
+        };
+        
+        // Check if this is a file type we want to process
+        let extensions_to_process = [".fasta", ".fa", ".fastq", ".fq", ".fna"];
+        let should_process = extensions_to_process.contains(&real_ext);
+        
+        let new_file_name = if is_gz {
+            format!("{}_filtered{}{}", real_stem, real_ext, extension) // input_filtered.fastq.gz
+        } else {
+            format!("{}_filtered{}", real_stem, real_ext) // input_filtered.fasta
+        };
+
+        Ok((new_file_name, should_process))
+    }
+
+
+    pub fn run(args: Args) -> Result<()> {
+        let min_len = args.min_len.unwrap_or(0);
+        let max_len = args.max_len.unwrap_or(usize::MAX);
+
+        // --- BRANCH 1: Batch processing from a directory ---
+        if let Some(input_dir) = args.input_dir {
+            let output_dir = args.output_dir.ok_or_else(|| {
+                anyhow!("--output-dir is required when using --input-dir")
+            })?;
+            
+            if args.outfile.is_some() {
+                return Err(anyhow!("--outfile cannot be used with --input-dir. Use --output-dir instead."));
+            }
+
+            fs::create_dir_all(&output_dir)
+                .with_context(|| format!("Failed to create output directory: {:?}", output_dir))?;
+
+            println!("---> Starting batch filter in directory: {}", input_dir.display());
+
+            for entry in fs::read_dir(input_dir)? {
+                let entry = entry?;
+                let input_path = entry.path();
+                
+                if input_path.is_file() {
+                    let (new_file_name, should_process) = match get_output_filename(&input_path) {
+                        Ok((name, process)) => (name, process),
+                        Err(e) => {
+                             println!("---> Skipping file {}: {}", input_path.display(), e); // <-- 修复：将 input_PANTS 改为 input_path
+                             continue;
+                        }
+                    };
+
+                    if !should_process {
+                         println!("---> Skipping unsupported file type: {}", input_path.display());
+                         continue;
+                    }
+                    
+                    let output_path = output_dir.join(new_file_name);
+
+                    // 2. Open reader
+                    let format = match detect_format(&input_path) {
+                         Ok(f) => f,
+                         Err(e) => {
+                             println!("---> Skipping file {}: {}", input_path.display(), e);
+                             continue;
+                         }
+                    };
+                    
+                    let file = File::open(&input_path)?;
+                    let buf_reader = BufReader::new(file);
+                    let input_reader: Box<dyn BufRead> =
+                        if input_path.extension().map_or(false, |ext| ext == "gz") {
+                            Box::new(BufReader::new(MultiGzDecoder::new(buf_reader)))
+                        } else {
+                            Box::new(buf_reader)
+                        };
+                    
+                    // 3. Open writer
+                    let mut writer: Box<dyn Write> = Box::new(BufWriter::new(File::create(&output_path)?));
+
+                    // 4. Process
+                    println!("---> Filtering {} -> {}", input_path.display(), output_path.display());
+                    let count = process_file_stream(input_reader, &mut writer, &format, min_len, max_len)
+                        .with_context(|| format!("Failed to process file: {:?}", input_path))?;
+                    println!("✔ Wrote {} records to {}", count, output_path.display());
+                }
+            }
+            println!("🎉 Batch filtering complete.");
+
+        // --- BRANCH 2: Original logic (concatenate and filter) ---
+        } else if !args.input_files.is_empty() {
+            if args.output_dir.is_some() {
+                 return Err(anyhow!("--output-dir can only be used with --input-dir."));
+            }
+            
+            let mut writer: Box<dyn Write> = if let Some(path) = args.outfile {
+                Box::new(BufWriter::new(File::create(path)?))
+            } else {
+                Box::new(BufWriter::new(io::stdout().lock()))
+            };
+
+            let mut first_format: Option<Format> = None;
+            let mut total_records = 0;
+
+            for input_path in &args.input_files {
+                eprintln!("---> Processing (and appending): {}", input_path.display());
+                let format = detect_format(input_path)?;
+                
+                // Ensure all files are the same format when concatenating
+                if let Some(ref first) = first_format {
+                    if *first != format {
+                         return Err(anyhow!(
+                            "Mismatched formats: Cannot concatenate FASTA and FASTQ files into one output."
+                         ));
+                    }
+                } else {
+                    first_format = Some(format);
+                }
+                
+                let file = File::open(input_path)?;
+                let buf_reader = BufReader::new(file);
+                let input_reader: Box<dyn BufRead> =
+                    if input_path.extension().map_or(false, |ext| ext == "gz") {
+                        Box::new(BufReader::new(MultiGzDecoder::new(buf_reader)))
+                    } else {
+                        Box::new(buf_reader)
+                    };
+
+                total_records += process_file_stream(input_reader, &mut writer, first_format.as_ref().unwrap(), min_len, max_len)
+                    .with_context(|| format!("Failed to process file: {:?}", input_path))?;
+            }
+            eprintln!("✔ Total records written: {}", total_records);
+        }
+        // No 'else' needed, as clap's 'input_mode' group ensures one branch is taken
+        
         Ok(())
     }
 }
@@ -1230,7 +1449,7 @@ mod ns_count {
                 csv_writer.write_record(&[format!("{}_{}_combo", group, n_label), "Count".to_string(), "Frequency (%)".to_string()])?;
                 
                 let mut sorted_combos: Vec<_> = counter.iter().collect();
-                sorted_combos.sort_by(|a, b| b.1.cmp(a.1));
+                sorted_combos.sort_by(|a, b| b.1.cmp(&a.1));
 
                 for (combo, count) in sorted_combos {
                     let freq = (*count as f64 / total as f64) * 100.0;
@@ -1320,7 +1539,7 @@ mod ns_count {
                                 }
                                 let rc_read = bio::alphabets::dna::revcomp(&read_seq);
                                 if let Some(combo) = find_alignment(&rc_read, ref_data, &args_clone, true) {
-                                     if tx.send(MatchResult { ref_id: ref_data.id.clone(), combo, read_record: read_record.clone() }).is_ok() {
+                                    if tx.send(MatchResult { ref_id: ref_data.id.clone(), combo, read_record: read_record.clone() }).is_ok() {
                                         break 'ref_loop;
                                     }
                                 }
@@ -1362,5 +1581,752 @@ mod ns_count {
 
         println!("\n✔ All alignment tasks are complete.");
         Ok(())
+    }
+}
+
+// ==================================================================================
+// `dna2aa` subcommand module (NEW)
+// ==================================================================================
+mod dna2aa {
+    use anyhow::{anyhow, Context, Result};
+    use bio::io::fasta; // 只导入 FASTA 读写器
+    use clap::Parser;
+    use rayon::prelude::*;
+    use std::collections::HashMap;
+    use std::fs::{self, File};
+    use std::io::BufReader;
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+
+    #[derive(Parser, Debug)]
+    #[command(name = "DNA2AA", about = "Translate DNA FASTA files in a directory to Amino Acid FASTA files")]
+    pub struct Args {
+        #[arg(long, short = 'i', help = "Input directory containing DNA FASTA files")]
+        pub input: PathBuf,
+
+        #[arg(long, short = 'o', help = "Output directory for translated protein FASTA files")]
+        pub output: PathBuf,
+
+        #[arg(long, default_value_t = 50, help = "Minimum amino acid length to keep")]
+        pub aa_length: usize,
+    }
+
+    // --------------------------------------------------------------------------------
+    // 修复：手动实现标准密码子表，移除对 `bio` 库翻译功能的依赖
+    // --------------------------------------------------------------------------------
+    type CodonTable = HashMap<[u8; 3], u8>;
+
+    /// 构建一个标准的DNA密码子表
+    fn build_codon_table() -> CodonTable {
+        let mut table = HashMap::new();
+        // 终止密码子 (Stop Codons)
+        table.insert(*b"TAA", b'*');
+        table.insert(*b"TAG", b'*');
+        table.insert(*b"TGA", b'*');
+        // 苯丙氨酸 (F)
+        table.insert(*b"TTT", b'F');
+        table.insert(*b"TTC", b'F');
+        // 亮氨酸 (L)
+        table.insert(*b"TTA", b'L');
+        table.insert(*b"TTG", b'L');
+        table.insert(*b"CTT", b'L');
+        table.insert(*b"CTC", b'L');
+        table.insert(*b"CTA", b'L');
+        table.insert(*b"CTG", b'L');
+        // 异亮氨酸 (I)
+        table.insert(*b"ATT", b'I');
+        table.insert(*b"ATC", b'I');
+        table.insert(*b"ATA", b'I');
+        // 甲硫氨酸 (M) - 起始
+        table.insert(*b"ATG", b'M');
+        // 缬氨酸 (V)
+        table.insert(*b"GTT", b'V');
+        table.insert(*b"GTC", b'V');
+        table.insert(*b"GTA", b'V');
+        table.insert(*b"GTG", b'V');
+        // 丝氨酸 (S)
+        table.insert(*b"TCT", b'S');
+        table.insert(*b"TCC", b'S');
+        table.insert(*b"TCA", b'S');
+        table.insert(*b"TCG", b'S');
+        table.insert(*b"AGT", b'S');
+        table.insert(*b"AGC", b'S');
+        // 脯氨酸 (P)
+        table.insert(*b"CCT", b'P');
+        table.insert(*b"CCC", b'P');
+        table.insert(*b"CCA", b'P');
+        table.insert(*b"CCG", b'P');
+        // 苏氨酸 (T)
+        table.insert(*b"ACT", b'T');
+        table.insert(*b"ACC", b'T');
+        table.insert(*b"ACA", b'T');
+        table.insert(*b"ACG", b'T');
+        // 丙氨酸 (A)
+        table.insert(*b"GCT", b'A');
+        table.insert(*b"GCC", b'A');
+        table.insert(*b"GCA", b'A');
+        table.insert(*b"GCG", b'A');
+        // 酪氨酸 (Y)
+        table.insert(*b"TAT", b'Y');
+        table.insert(*b"TAC", b'Y');
+        // 组氨酸 (H)
+        table.insert(*b"CAT", b'H');
+        table.insert(*b"CAC", b'H');
+        // 谷氨酰胺 (Q)
+        table.insert(*b"CAA", b'Q');
+        table.insert(*b"CAG", b'Q');
+        // 天冬酰胺 (N)
+        table.insert(*b"AAT", b'N');
+        table.insert(*b"AAC", b'N');
+        // 赖氨酸 (K)
+        table.insert(*b"AAA", b'K');
+        table.insert(*b"AAG", b'K');
+        // 天冬氨酸 (D)
+        table.insert(*b"GAT", b'D');
+        table.insert(*b"GAC", b'D');
+        // 谷氨酸 (E)
+        table.insert(*b"GAA", b'E');
+        table.insert(*b"GAG", b'E');
+        // 半胱氨酸 (C)
+        table.insert(*b"TGT", b'C');
+        table.insert(*b"TGC", b'C');
+        // 色氨酸 (W)
+        table.insert(*b"TGG", b'W');
+        // 精氨酸 (R)
+        table.insert(*b"CGT", b'R');
+        table.insert(*b"CGC", b'R');
+        table.insert(*b"CGA", b'R');
+        table.insert(*b"CGG", b'R');
+        table.insert(*b"AGA", b'R');
+        table.insert(*b"AGG", b'R');
+        // 甘氨酸 (G)
+        table.insert(*b"GGT", b'G');
+        table.insert(*b"GGC", b'G');
+        table.insert(*b"GGA", b'G');
+        table.insert(*b"GGG", b'G');
+        table
+    }
+
+    /// Translates a DNA sequence until the first stop codon (which is not included).
+    /// Mimics Biopython's `seq.translate(to_stop=True)`
+    fn translate_to_stop(dna_seq: &[u8], table: &CodonTable) -> Vec<u8> {
+        let mut protein = Vec::new();
+
+        // 遍历3碱基的密码子
+        for codon_bytes in dna_seq.chunks_exact(3) {
+            // 将 &[u8] 转换为 [u8; 3]
+            let codon: [u8; 3] = [
+                codon_bytes[0].to_ascii_uppercase(), 
+                codon_bytes[1].to_ascii_uppercase(), 
+                codon_bytes[2].to_ascii_uppercase()
+            ];
+
+            match table.get(&codon) {
+                Some(aa) => {
+                    if *aa == b'*' {
+                        // 找到终止密码子，停止翻译
+                        break;
+                    }
+                    // 添加氨基酸
+                    protein.push(*aa);
+                }
+                None => {
+                    // 无法识别的密码子 (例如 'N')，翻译为 'X'
+                    protein.push(b'X');
+                }
+            }
+        }
+        protein
+    }
+    // --------------------------------------------------------------------------------
+    // 修复结束
+    // --------------------------------------------------------------------------------
+
+    /// Processes a single FASTA file: translates it and saves the result.
+    fn process_single_file(
+        input_path: &Path,
+        output_dir: &Path,
+        min_aa_length: usize,
+        table: &CodonTable, // <-- 接收密码子表
+    ) -> Result<()> {
+        // 1. Determine output path
+        let file_stem = input_path
+            .file_stem()
+            .ok_or_else(|| anyhow!("Could not get file stem for {:?}", input_path))?;
+        let output_filename = format!("{}_protein.fasta", file_stem.to_string_lossy());
+        let output_path = output_dir.join(output_filename);
+
+        // 2. Setup reader and writer
+        let file = File::open(input_path)
+            .with_context(|| format!("Failed to open input file: {:?}", input_path))?;
+        let reader = fasta::Reader::new(BufReader::new(file));
+        let mut writer = fasta::Writer::to_file(&output_path)
+            .with_context(|| format!("Failed to create output file: {:?}", output_path))?;
+
+        let mut records_written = 0;
+
+        // 3. Translation logic
+        for result in reader.records() {
+            let record = result?;
+            
+            // Translate the DNA sequence, stopping at the first STOP codon
+            let protein = translate_to_stop(record.seq(), table); // <-- 传入密码子表
+
+            if protein.len() >= min_aa_length {
+                // Create a new FASTA record for the protein
+                let aa_record =
+                    fasta::Record::with_attrs(record.id(), None, &protein);
+                writer.write_record(&aa_record)?;
+                records_written += 1;
+            }
+        }
+
+        if records_written > 0 {
+             println!(
+                "Processed {:?} -> {:?} (Wrote {} records)",
+                input_path.file_name().unwrap_or_default(),
+                output_path.file_name().unwrap_or_default(),
+                records_written
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Main run function for the DNA2AA subcommand
+    pub fn run(args: Args) -> Result<()> {
+        let start_time = std::time::Instant::now();
+        
+        // 1. 创建密码子表并用 Arc 包装，以便安全地跨线程共享
+        let codon_table = Arc::new(build_codon_table());
+
+        // 2. Create output directory
+        fs::create_dir_all(&args.output)
+            .with_context(|| format!("Failed to create output directory: {:?}", args.output))?;
+
+        // 3. Find all input files
+        let input_files: Vec<PathBuf> = fs::read_dir(&args.input)
+            .with_context(|| format!("Failed to read input directory: {:?}", args.input))?
+            .filter_map(|entry_result| {
+                let entry = entry_result.ok()?;
+                let path = entry.path();
+                if path.is_file() {
+                    if let Some(ext_str) = path.extension().and_then(|s| s.to_str()) {
+                        // Match common FASTA extensions
+                        if ext_str == "fasta" || ext_str == "fa" || ext_str == "fna" {
+                            return Some(path);
+                        }
+                    }
+                }
+                None
+            })
+            .collect();
+        
+        if input_files.is_empty() {
+             println!("Warning: No FASTA files (.fasta, .fa, .fna) found in {:?}.", args.input);
+             return Ok(());
+        }
+
+        println!(
+            "---> Found {} FASTA files to process in parallel...",
+            input_files.len()
+        );
+
+        // 4. Process files in parallel (similar to Python's ProcessPoolExecutor)
+        input_files.par_iter().for_each(|input_path| {
+            // 为每个线程克隆 Arc 引用（开销很小）
+            let table_clone = Arc::clone(&codon_table);
+            if let Err(e) = process_single_file(input_path, &args.output, args.aa_length, &table_clone) {
+                // Print errors from within the parallel loop
+                eprintln!("\n[Error] Failed to process file {:?}: {}\n", input_path.display(), e);
+            }
+        });
+
+        println!("\n🎉 All files processed successfully! Total time: {:.2?}", start_time.elapsed());
+        println!("Results are in: {}", args.output.display());
+        Ok(())
+    }
+}
+
+// ==================================================================================
+// `count_AA` subcommand module (NEWLY ADDED)
+// ==================================================================================
+mod count_aa {
+    use anyhow::{anyhow, Context, Result};
+    use bio::io::fasta::{self, Record};
+    use clap::Parser;
+    use crossbeam_channel::bounded;
+    use dashmap::DashMap; // For concurrent counting
+    use glob::glob; // For file matching
+    use rayon::prelude::*; // For parallel iteration
+    use std::collections::HashSet; // <-- 修复：移除未使用的 HashMap
+    use std::fs::{self, File};
+    use std::io::BufReader;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+    use std::thread;
+    use std::time::Instant;
+
+    #[derive(Parser, Debug)]
+    #[command(name = "count_AA", about = "[NEW] Count AA mutations against a reference protein sequence, replicating the logic from Count_AAmutants.py")]
+    pub struct Args {
+        #[arg(short = 'r', long, help = "参考蛋白FASTA序列 (Reference protein FASTA sequence)")]
+        pub reference: PathBuf,
+
+        #[arg(short = 'i', long, help = "包含多个FASTA文件的目录 (Directory containing multiple FASTA files)")]
+        pub input_dir: PathBuf,
+
+        #[arg(short = 'o', long, help = "输出CSV文件的目录 (Output directory for CSV files)")]
+        pub output_dir: PathBuf,
+
+        #[arg(short = 'A', long, help = "位置偏移量 (Position offset)", default_value_t = 0)]
+        pub aa_offset: i32,
+
+        #[arg(short = 'c', long, help = "CSV配置文件，包含protected_sites列 (CSV config file with 'protected_sites' column)")]
+        pub config: Option<PathBuf>,
+
+        #[arg(long, help = "匹配参考起始位置的氨基酸数量 (Number of AAs to match ref start)", default_value_t = 6)]
+        pub match_len: usize,
+
+        #[arg(long, help = "每个文件的并行线程数 (Parallel threads per file)", default_value_t = 8)]
+        pub threads: usize,
+
+        #[arg(long, help = "每块reads数量 (Number of reads per chunk)", default_value_t = 100000)]
+        pub chunk_size: usize,
+    }
+
+    /// (Helper) Loads the first sequence from a FASTA file.
+    fn load_reference_sequence(path: &Path) -> Result<Vec<u8>> {
+        let file = File::open(path)
+            .with_context(|| format!("Failed to open reference file: {:?}", path))?;
+        let reader = fasta::Reader::new(BufReader::new(file)); // <-- 修复：移除 mut
+        let record = reader
+            .records()
+            .next()
+            .ok_or_else(|| anyhow!("Reference FASTA file is empty: {:?}", path))??;
+        
+        Ok(record.seq().to_ascii_uppercase())
+    }
+
+    /// (Helper) Loads protected sites from the config CSV.
+    fn load_config(path: &Option<PathBuf>) -> Result<HashSet<usize>> {
+        let mut protected = HashSet::new();
+        let config_path = match path {
+            Some(p) => p,
+            None => return Ok(protected), // No config, return empty set
+        };
+
+        println!("---> Loading config: {}", config_path.display());
+        let file = File::open(config_path)
+            .with_context(|| format!("Failed to open config file: {:?}", config_path))?;
+        let mut rdr = csv::Reader::from_reader(file);
+
+        // Find the 'protected_sites' column index
+        let headers = rdr.headers()?.clone();
+        let site_col_idx = headers.iter().position(|h| h == "protected_sites");
+
+        let site_col_idx = match site_col_idx {
+            Some(idx) => idx,
+            None => {
+                println!("Warning: Config file provided, but 'protected_sites' column not found.");
+                return Ok(protected);
+            }
+        };
+
+        // Iterate through records and parse sites
+        for result in rdr.records() {
+            let record = result?;
+            if let Some(val_str) = record.get(site_col_idx) {
+                if val_str.is_empty() { continue; }
+                
+                match val_str.trim().parse::<f64>() { // Parse as f64 to match Python's behavior
+                    Ok(val) => {
+                        let site_1_based = val as usize;
+                        if site_1_based > 0 {
+                            protected.insert(site_1_based - 1); // Convert to 0-based index
+                        }
+                    }
+                    Err(_) => {
+                         println!("Warning: Could not parse protected site value '{}'", val_str);
+                    }
+                }
+            }
+        }
+        
+        println!("Loaded {} protected sites from config.", protected.len());
+        Ok(protected)
+    }
+
+    /// (Helper) This is the core logic from the Python `analyze_chunk` function.
+    /// It processes a chunk of reads and updates the global concurrent counters.
+    fn analyze_chunk(
+        reference_seq: &Vec<u8>,
+        reads: Vec<fasta::Record>,
+        protected_sites: &HashSet<usize>,
+        match_len: usize,
+        aa_counts: &[DashMap<u8, AtomicU64>], // A slice of concurrent maps
+        total_reads: &AtomicU64,
+        total_valid: &AtomicU64,
+    ) {
+        let seq_len = reference_seq.len();
+        total_reads.fetch_add(reads.len() as u64, Ordering::Relaxed);
+        let mut local_valid_reads = 0;
+
+        for record in reads {
+            let read = record.seq().to_ascii_uppercase();
+            if read.is_empty() { continue; }
+
+            // Prevent panic on reads shorter than match_len
+            let match_segment_len = match_len.min(read.len());
+            let read_start_segment = &read[..match_segment_len];
+            
+            if read_start_segment.is_empty() { continue; }
+
+            // Find start position (Rust equivalent of Python's `str.find()`)
+            let ref_start_pos = reference_seq
+                .windows(read_start_segment.len())
+                .position(|window| window == read_start_segment);
+
+            if ref_start_pos.is_none() {
+                continue; // Not found
+            }
+            
+            let ref_start = ref_start_pos.unwrap();
+            let mut violate = false;
+            let mut mutation_count = 0;
+            
+            // We store (pos, aa) pairs and only update counts *after* checking for violations.
+            // This ensures we don't count AAs from invalid (violated) reads.
+            let mut pos_counts: Vec<(usize, u8)> = Vec::with_capacity(read.len());
+
+            for (i, &aa) in read.iter().enumerate() {
+                let pos = ref_start + i;
+                if pos >= seq_len {
+                    break; // Read is longer than remaining ref
+                }
+                
+                let ref_aa = reference_seq[pos];
+
+                if aa != ref_aa {
+                    if protected_sites.contains(&pos) {
+                        violate = true;
+                        break; // Stop checking this read immediately
+                    }
+                    mutation_count += 1;
+                }
+                pos_counts.push((pos, aa));
+            }
+
+            // Only if the read is valid do we add its counts to the global map
+            if !violate {
+                for (pos, aa) in pos_counts {
+                    // Find the concurrent map for this position
+                    // Get or create an AtomicU64 counter for this AA
+                    // Increment the counter atomically
+                    aa_counts[pos]
+                        .entry(aa)
+                        .or_insert_with(|| AtomicU64::new(0))
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+                
+                // Check the *other* condition for a "valid read"
+                if mutation_count <= 1 {
+                    local_valid_reads += 1;
+                }
+            }
+        }
+        
+        // Atomically update the global "valid" counter
+        total_valid.fetch_add(local_valid_reads, Ordering::Relaxed);
+    }
+
+
+    /// Main run function for the count_AA subcommand
+    pub fn run(args: Args) -> Result<()> {
+        let main_start_time = Instant::now();
+        
+        fs::create_dir_all(&args.output_dir)
+            .with_context(|| format!("Failed to create output directory: {:?}", args.output_dir))?;
+
+        // 1. Load Reference and Config
+        let reference_seq = Arc::new(load_reference_sequence(&args.reference)?);
+        let protected_sites = Arc::new(load_config(&args.config)?);
+        println!("Reference sequence loaded ({} AAs).", reference_seq.len());
+
+        // 2. Find input FASTA files (using `glob` crate)
+        let pattern1 = args.input_dir.join("*.fasta").to_string_lossy().to_string();
+        let pattern2 = args.input_dir.join("*.fa").to_string_lossy().to_string();
+        
+        let fasta_files: Vec<PathBuf> = glob(&pattern1)?
+            .filter_map(Result::ok)
+            .chain(glob(&pattern2)?.filter_map(Result::ok))
+            .collect();
+
+        if fasta_files.is_empty() {
+            println!("No FASTA files (.fasta, .fa) found in {:?}.", args.input_dir);
+            return Ok(());
+        }
+
+        println!("Processing {} FASTA files in parallel ({} threads per file)...", fasta_files.len(), args.threads);
+
+        // 3. Configure Rayon global thread pool
+        // This sets the *total* number of threads Rayon will use.
+        rayon::ThreadPoolBuilder::new().num_threads(args.threads).build_global()?;
+
+        // 4. Process each file (sequentially, as in Python)
+        // The parallelism is *within* each file's chunk processing.
+        for fasta_file in fasta_files {
+            let file_start_time = Instant::now();
+            let file_stem = fasta_file.file_stem().unwrap_or_default().to_string_lossy();
+            println!("\n---> Processing file: {}", fasta_file.display());
+
+            // --- Setup concurrent data structures for this file ---
+            let seq_len = reference_seq.len();
+            // Create a Vec of DashMaps, one for each position in the reference
+            // Each DashMap stores: AA (u8) -> AtomicU64 (count)
+            let global_counts: Arc<Vec<DashMap<u8, AtomicU64>>> = 
+                Arc::new((0..seq_len).map(|_| DashMap::new()).collect());
+            
+            let total_reads = Arc::new(AtomicU64::new(0));
+            let total_valid = Arc::new(AtomicU64::new(0));
+
+            // Create Arcs for data to be shared across threads
+            let reference_seq_clone = Arc::clone(&reference_seq);
+            let protected_sites_clone = Arc::clone(&protected_sites);
+            let global_counts_clone = Arc::clone(&global_counts);
+            let total_reads_clone = Arc::clone(&total_reads);
+            let total_valid_clone = Arc::clone(&total_valid);
+            
+            let (tx, rx) = bounded::<Vec<fasta::Record>>(args.threads * 2); // Channel for chunks of records
+
+            // --- Use thread::scope for structured concurrency ---
+            let res: Result<()> = thread::scope(|s| {
+                // --- 1. Reader Thread ---
+                // This thread reads the FASTA file and sends chunks of records to the channel
+                let fasta_file_clone = fasta_file.clone();
+                let chunk_size = args.chunk_size;
+                s.spawn(move || {
+                    let file = match File::open(&fasta_file_clone) {
+                        Ok(f) => f,
+                        Err(e) => {
+                            eprintln!("Error opening {}: {:?}", fasta_file_clone.display(), e);
+                            return; // Exit thread
+                        }
+                    };
+                    let reader = BufReader::new(file);
+                    let fasta_reader = fasta::Reader::new(reader); // <-- 修复：移除 mut
+                    let mut records_iter = fasta_reader.records();
+
+                    loop {
+                        let mut chunk = Vec::with_capacity(chunk_size);
+                        for _ in 0..chunk_size {
+                            match records_iter.next() {
+                                Some(Ok(record)) => chunk.push(record),
+                                Some(Err(e)) => {
+                                    eprintln!("Error reading record from {}: {}", fasta_file_clone.display(), e);
+                                    // Continue to next record
+                                },
+                                None => break, // End of file
+                            }
+                        }
+                        
+                        let is_empty = chunk.is_empty();
+                        if tx.send(chunk).is_err() {
+                            break; // Receiver hung up, stop reading
+                        }
+                        if is_empty {
+                            break; // End of file
+                        }
+                    }
+                });
+
+                // --- 2. Worker Pool (using Rayon) ---
+                // This consumes chunks from the channel (rx)
+                // `par_bridge` turns the channel iterator into a parallel iterator
+                // `for_each` processes each chunk in parallel using the Rayon thread pool
+                rx.into_iter().par_bridge().for_each(|chunk: Vec<Record>| {
+                    analyze_chunk(
+                        &reference_seq_clone,
+                        chunk,
+                        &protected_sites_clone,
+                        args.match_len,
+                        &global_counts_clone,
+                        &total_reads_clone,
+                        &total_valid_clone,
+                    );
+                });
+
+                Ok(())
+            }); // --- End of thread::scope ---
+
+            if let Err(e) = res {
+                eprintln!("Error during processing {}: {:?}", fasta_file.display(), e);
+                continue; // Skip to next file
+            }
+
+            // --- 3. Collate and Write Results for this file ---
+            let total_r = total_reads.load(Ordering::Relaxed);
+            let total_v = total_valid.load(Ordering::Relaxed);
+            println!("{} - Valid reads: {} / {}", file_stem, total_v, total_r);
+
+            let mut mutation_stats = Vec::new();
+            for (i, counter_map) in global_counts.iter().enumerate() {
+                let ref_aa = reference_seq[i]; // Get the reference AA at this position
+                let adj_pos = (i as i32) + 1 + args.aa_offset; // Calculate the adjusted position
+                
+                for item in counter_map.iter() {
+                    let aa = *item.key();
+                    let count = item.value().load(Ordering::Relaxed);
+                    if count > 0 {
+                        // Format: e.g., "A123C"
+                        let mutation_str = format!("{}{}{}", ref_aa as char, adj_pos, aa as char);
+                        mutation_stats.push((mutation_str, count));
+                    }
+                }
+            }
+            
+            // Sort by mutation string (e.g., "A10C" before "A11G")
+            mutation_stats.sort_by(|a, b| a.0.cmp(&b.0));
+
+            // Write to CSV
+            let output_file_name = format!("{}_mutation.csv", file_stem);
+            let output_path = args.output_dir.join(output_file_name);
+            
+            let mut wtr = csv::Writer::from_path(&output_path)
+                .with_context(|| format!("Failed to create output CSV: {:?}", output_path))?;
+            
+            wtr.write_record(&["Mutation", "Count"])?;
+            for (mutation, count) in mutation_stats {
+                wtr.write_record(&[mutation, count.to_string()])?;
+            }
+            
+            wtr.flush()?;
+            println!("Results saved to: {}", output_path.display());
+            println!("Time taken for {}: {:.2?}", file_stem, file_start_time.elapsed());
+        }
+
+        println!("\n🎉 All files have been processed. Total time: {:.2?}", main_start_time.elapsed());
+        Ok(())
+    }
+}mod find_seq {
+    use super::common::{detect_format, Format};
+    use anyhow::Result;
+    use bio::io::{fasta, fastq};
+    use clap::Parser;
+    use csv::Writer;
+    use flate2::bufread::MultiGzDecoder;
+    use std::collections::{HashMap, HashSet};
+    use std::fs::File;
+    use std::io::{BufRead, BufReader};
+    use std::path::PathBuf;
+
+    #[derive(Parser, Debug)]
+    #[command(
+        name = "find_seq",
+        about = "Find a motif in FASTA/FASTQ (gz supported), consider reverse complement, extract upstream/downstream flanks, and count unique windows per read. Outputs CSV with Sequence, UpFlank, DownFlank, ReadsCount."
+    )]
+    pub struct Args {
+        #[arg(long, help = "Input FASTA/FASTQ file (optionally .gz)")]
+        pub inputfile: PathBuf,
+        #[arg(long, help = "Output CSV file path")]
+        pub output: PathBuf,
+        #[arg(long, help = "Target motif sequence")]
+        pub motif: String,
+        #[arg(long, help = "Upstream flank length", default_value_t = 0)]
+        pub up_flank: usize,
+        #[arg(long, help = "Downstream flank length", default_value_t = 0)]
+        pub down_flank: usize,
+    }
+
+    fn revcomp(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        for &b in s.as_bytes().iter().rev() {
+            let c = match b {
+                b'A' => 'T',
+                b'T' => 'A',
+                b'C' => 'G',
+                b'G' => 'C',
+                b'N' => 'N',
+                _ => 'N',
+            };
+            out.push(c);
+        }
+        out
+    }
+
+    fn find_all(hay: &str, needle: &str) -> Vec<usize> {
+        let mut res = Vec::new();
+        let mut start = 0usize;
+        while let Some(pos) = hay[start..].find(needle) {
+            res.push(start + pos);
+            start = start + pos + 1;
+        }
+        res
+    }
+
+    pub fn run(mut args: Args) -> Result<()> {
+        let default_flank = 40usize;
+        if args.up_flank == 0 && args.down_flank == 0 { args.up_flank = default_flank; args.down_flank = default_flank; }
+        else if args.up_flank == 0 { args.up_flank = args.down_flank; }
+        else if args.down_flank == 0 { args.down_flank = args.up_flank; }
+        let up = args.up_flank; let down = args.down_flank;
+        let motif = args.motif.to_uppercase();
+        let motif_rc = revcomp(&motif);
+
+        let format = detect_format(&args.inputfile)?;
+        let file = File::open(&args.inputfile)?;
+        let buf_reader = BufReader::new(file);
+        let input_reader: Box<dyn BufRead> = if args.inputfile.extension().map_or(false, |ext| ext == "gz") { Box::new(BufReader::new(MultiGzDecoder::new(buf_reader))) } else { Box::new(buf_reader) };
+
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        match format {
+            Format::Fasta => {
+                let reader = fasta::Reader::new(input_reader);
+                for result in reader.records() {
+                    let record = result?;
+                    let seq = String::from_utf8(record.seq().to_vec()).unwrap().to_uppercase();
+                    process_seq(&seq, &motif, &motif_rc, up, down, &mut counts);
+                }
+            }
+            Format::Fastq => {
+                let reader = fastq::Reader::new(input_reader);
+                for result in reader.records() {
+                    let record = result?;
+                    let seq = String::from_utf8(record.seq().to_vec()).unwrap().to_uppercase();
+                    process_seq(&seq, &motif, &motif_rc, up, down, &mut counts);
+                }
+            }
+        }
+
+        let mut wtr = Writer::from_path(&args.output)?;
+        wtr.write_record(["Sequence", "UpFlank", "DownFlank", "ReadsCount"])?;
+        for (seq, c) in counts.into_iter() {
+            let up_seq = if up > 0 { seq[..up].to_string() } else { String::new() };
+            let down_seq = if down > 0 { seq[seq.len() - down..].to_string() } else { String::new() };
+            wtr.write_record([seq, up_seq, down_seq, c.to_string()])?;
+        }
+        wtr.flush()?;
+        Ok(())
+    }
+
+    fn process_seq(seq: &str, motif: &str, motif_rc: &str, up: usize, down: usize, counts: &mut HashMap<String, usize>) {
+        let mut per_read: HashSet<String> = HashSet::new();
+        for idx in find_all(seq, motif) {
+            let left = idx as isize - up as isize;
+            let right = idx + motif.len() + down;
+            if left < 0 || right > seq.len() { continue; }
+            let w = &seq[left as usize..right];
+            per_read.insert(w.to_string());
+        }
+        for idx in find_all(seq, motif_rc) {
+            let left = idx as isize - down as isize;
+            let right = idx + motif.len() + up;
+            if left < 0 || right > seq.len() { continue; }
+            let w = &seq[left as usize..right];
+            let w_rc = revcomp(w);
+            per_read.insert(w_rc);
+        }
+        for w in per_read { *counts.entry(w).or_insert(0) += 1; }
     }
 }
