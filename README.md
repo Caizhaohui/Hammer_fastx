@@ -98,6 +98,10 @@ SampleID,F_tag,R_tag
 S1,ACGTACGT,TGCATGCA
 S2,AAAACCCC,GGGGTTTT
 ```
+- 输出示例结构：
+  - `results/sampleA/01_fastp_out/filtered_R1.fastq.gz`、`filtered_R2.fastq.gz`
+  - `results/sampleA/02_flash2_out/merged.extendedFrags.fastq`
+  - `results/sampleA/03_demux_out/<SampleID>.fasta`
 
 ### mergePE（质控并合并）
 
@@ -112,6 +116,13 @@ hammer_fastx mergePE \
   --min-overlap 10 --max-overlap 300
 ```
 - 输出：`merged.fastq` 或 `merged.fasta`（取决于 `--out-fasta`）
+- FASTA 输出示例：
+```bash
+hammer_fastx mergePE \
+  --in1 raw/R1.fastq.gz --in2 raw/R2.fastq.gz \
+  --outfile merged/merged.fasta \
+  --out-fasta
+```
 
 ### demux_only（样本拆分）
 
@@ -126,6 +137,11 @@ hammer_fastx demux_only \
   --threads 12 -l 8 --trim --out-fasta
 ```
 - 输出：`demux_out/SampleID.(fastq|fasta)`
+- Barcode 文件格式（制表符分隔）也支持：
+```text
+ACGTACGT\tS1
+AAAACCCC\tS2
+```
 
 ### fastp（质控包装）
 
@@ -175,6 +191,7 @@ filename,sequence,count
 a,ACGT,2
 a,TTTT,1
 ```
+- 说明：导出时会归一化大小写（转大写）并去除首尾空白；计数按降序排列
 
 ### filter（长度过滤）
 
@@ -207,6 +224,11 @@ hammer_fastx Ns_count \
 - 输出：
   - `ns_out/<ref_id>_combo_counts.csv`
   - 选项开启时：`ns_out/<ref_id>_matched_reads.fasta`
+- 参考 FASTA 示例（含 N 块）：
+```fasta
+>ref1
+AAAANNNCCCTTTNNNGGG
+```
 
 ### DNA2AA（DNA→蛋白）
 
@@ -217,6 +239,10 @@ hammer_fastx Ns_count \
 hammer_fastx DNA2AA --input dna_dir --output aa_dir --aa-length 80
 ```
 - 输出：`aa_dir/<input_basename>.fasta`
+- 批量目录示例：
+```bash
+hammer_fastx DNA2AA --input data/dna --output data/aa
+```
 
 ### count_AA（蛋白突变统计）
 
@@ -231,6 +257,12 @@ hammer_fastx count_AA \
   --aa-offset 1 --config protected_sites.csv --threads 12 --chunk_size 500000
 ```
 - 输出：每个输入 FASTA 对应一个 CSV（突变计数与频率）
+- 保护位点配置 CSV 示例：
+```csv
+protected_sites
+12
+55
+```
 
 ### find_seq（基序查找与片段提取）
 
@@ -251,6 +283,7 @@ Sequence,UpFlank,DownFlank,ReadsCount
 NAAATGCCTT,NAA,CTT,1
 NAAATGCTTT,NAA,TTT,1
 ```
+- 反向互补示例：当读段中出现 `GCAT`（`ATGC` 的反向互补）时，会归一到正向窗口并计数
 
 ### 2. 分步处理示例
 
