@@ -17,9 +17,10 @@ use std::process::{Command, Stdio}; // For executing external commands
 #[derive(Parser, Debug)]
 #[command(
     name = "Hammer_fastx",
-    version = "v1.2.2", // Hybrid: Modern codebase with classic anchor-based Ns_count logic
+    version,
     author = "CZH with the help of Gemini",
-    about = "A versatile toolkit for FASTX file processing, including QC, merging, and demultiplexing."
+    about = "A versatile toolkit for FASTX file processing, including QC, merging, and demultiplexing.",
+    help_template = "{name} v{version}\n{about}\n\n{usage-heading} {usage}\n\n{all-args}\n"
 )]
 struct Cli {
     #[command(subcommand)]
