@@ -908,7 +908,9 @@ mod stats {
     use anyhow::Result;
     use bio::io::{fasta, fastq};
     use clap::Parser;
+    use csv::Writer;
     use flate2::bufread::MultiGzDecoder;
+    use std::collections::HashMap;
     use std::fs::File;
     use std::io::{BufRead, BufReader};
     use std::path::{Path, PathBuf};
@@ -917,6 +919,8 @@ mod stats {
     pub struct Args {
         #[arg(long, help = "One or more input files (wildcards supported, e.g., '*.fasta')", required = true, num_args = 1..)]
         inputfile: Vec<PathBuf>,
+        #[arg(long, help = "Output CSV file for per-sequence counts")]
+        outfile: Option<PathBuf>,
     }
     
     struct FileStats {
@@ -978,6 +982,11 @@ mod stats {
 
     pub fn run(args: Args) -> Result<()> {
         let mut all_stats: Vec<FileStats> = Vec::new();
+        let mut wtr_opt: Option<Writer<File>> = if let Some(path) = args.outfile.clone() {
+            let mut w = Writer::from_path(path)?;
+            w.write_record(["filename", "sequence", "count"])?;
+            Some(w)
+        } else { None };
 
         for input_path in &args.inputfile {
             println!("---> Processing: {}", input_path.display());
@@ -996,6 +1005,7 @@ mod stats {
             let mut total_len = 0;
             let mut min_len = usize::MAX;
             let mut max_len = 0;
+            let mut seq_counts: HashMap<String, u64> = HashMap::new();
 
             match format {
                 Format::Fasta => {
@@ -1007,6 +1017,8 @@ mod stats {
                         total_len += len as u64;
                         if len < min_len { min_len = len; }
                         if len > max_len { max_len = len; }
+                        let seq = String::from_utf8(record.seq().to_vec()).unwrap().trim().to_uppercase();
+                        *seq_counts.entry(seq).or_insert(0) += 1;
                     }
                 }
                 Format::Fastq => {
@@ -1018,9 +1030,20 @@ mod stats {
                         total_len += len as u64;
                         if len < min_len { min_len = len; }
                         if len > max_len { max_len = len; }
+                        let seq = String::from_utf8(record.seq().to_vec()).unwrap().trim().to_uppercase();
+                        *seq_counts.entry(seq).or_insert(0) += 1;
                     }
                 }
             };
+
+            if let Some(wtr) = wtr_opt.as_mut() {
+                let fname = get_sample_name(input_path);
+                let mut entries: Vec<(String, u64)> = seq_counts.into_iter().collect();
+                entries.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+                for (seq, c) in entries {
+                    wtr.write_record([fname.clone(), seq, c.to_string()])?;
+                }
+            }
             
             all_stats.push(FileStats {
                 filename: get_sample_name(input_path),
@@ -1030,9 +1053,9 @@ mod stats {
                 max_len,
             });
         }
-        
+
+        if let Some(wtr) = wtr_opt.as_mut() { wtr.flush()?; }
         print_stats_table(&all_stats);
-        
         Ok(())
     }
 }

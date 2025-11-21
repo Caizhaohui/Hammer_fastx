@@ -156,13 +156,25 @@ hammer_fastx flash2 \
 
 ### stats（文件统计）
 
-- 功能：统计 FASTA/FASTQ 基本信息（序列数、总碱基数、最短/最长、平均长度）
-- 参数：`--inputfile <files...>`（支持 `.gz`）
+- 功能：统计 FASTA/FASTQ 基本信息（序列数、总碱基数、最短/最长、平均长度），并可将“序列种类与数量”按降序导出到 CSV
+- 参数：
+  - `--inputfile <files...>`：一个或多个输入文件（支持 `.gz`）
+  - `--outfile <path>`：将每个唯一序列的计数导出为 CSV，列为 `filename,sequence,count`
+  - 规范化：导出时会对序列做大小写归一（转大写）与首尾空白去除；结果按 `count` 降序排列，计数相同时按 `sequence` 升序
 - 使用示例：
 ```bash
+# 仅打印总体统计到标准输出
 hammer_fastx stats --inputfile samples/a.fasta samples/b.fastq.gz
+
+# 导出序列计数到 CSV
+hammer_fastx stats --inputfile samples/a.fasta --outfile seq_counts.csv
 ```
-- 输出：标准输出的表格统计
+- CSV 示例：
+```csv
+filename,sequence,count
+a,ACGT,2
+a,TTTT,1
+```
 
 ### filter（长度过滤）
 
