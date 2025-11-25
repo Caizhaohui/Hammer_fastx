@@ -476,3 +476,74 @@ P55L,5,0.02
 ## 依赖说明
 
 Hammer_fastx - 让生物信息学数据分析更加高效！
+## 快速上手示例数据
+
+以下示例数据可用于快速验证主要功能：
+
+```bash
+# 示例 FASTA（a.fasta）
+cat > a.fasta <<'FA'
+>r1
+ACGT
+>r2
+TTTT
+FA
+
+# 示例 FASTQ（a.fastq, b.fastq）
+cat > a.fastq <<'FQ'
+@r1
+ACGT
++
+!!!!
+FQ
+cat > b.fastq <<'FQ'
+@r2
+TTTT
++
+!!!!
+FQ
+
+# 示例标签 CSV（tags.csv）
+cat > tags.csv <<'CSV'
+SampleID,F_tag,R_tag
+S1,ACGTACGT,TGCATGCA
+S2,AAAACCCC,GGGGTTTT
+CSV
+```
+
+常用验证命令：
+
+```bash
+# 合并 FASTQ
+hammer_fastx merge_file --input-files a.fastq b.fastq --outfile merged.fastq
+
+# 随机化合并
+hammer_fastx merge_file --input-files a.fastq b.fastq --shuffle --outfile merged_shuffle.fastq
+
+# FASTQ→FASTA 转换并合并
+hammer_fastx merge_file --input-files a.fastq b.fastq --fastq-to-fasta --outfile merged.fa
+
+# 仅转换
+hammer_fastx merge_file --input-files a.fastq --convert-only --outfile a_converted.fasta
+
+# 统计文件
+hammer_fastx stats --inputfile a.fasta a.fastq --outfile seq_counts.csv
+
+# 按长度过滤（批量目录）
+mkdir -p filtered && cp a.fasta filtered/ && cp b.fastq filtered/
+hammer_fastx filter --input-dir filtered --output-dir filtered_out --min-len 2 --max-len 10
+```
+
+> 提示：以上命令均支持 `.gz` 压缩输入与输出；建议在大文件处理时根据硬件调整 `--threads` 与分块参数。
+
+## 变更日志
+
+- v1.0.0
+  - 新增 `merge_file`：多文件合并（保序/随机）、进度条、并发读取
+  - 支持 `.gz` 输入与输出
+  - 支持 `FASTQ→FASTA` 转换（合并或仅转换）
+  - 增强 `filter`：支持目录批量模式与拼接模式
+  - 增强 `stats`：导出唯一序列计数 CSV，大小写归一与排序
+  - 新增 `find_seq`：基序查找、反向互补、上下游片段提取与窗口计数
+  - 新增 `count_AA`：参考蛋白突变统计，保护位点控制与并行处理
+  - 新增 `DNA2AA`：DNA FASTA 批量翻译到 AA FASTA（可指定长度）
