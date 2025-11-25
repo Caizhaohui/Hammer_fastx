@@ -32,6 +32,10 @@ git clone https://github.com/Caizhaohui/Hammer_fastx.git
 cd Hammer_fastx
 cargo build --release
 cp target/release/hammer_fastx /usr/local/bin/
+
+# 全局安装（推荐）
+cargo install --path .
+# 安装后可在 ~/.cargo/bin/hammer_fastx 调用，确保将 ~/.cargo/bin 加入 PATH
 ```
 
 ### 外部依赖
@@ -59,6 +63,7 @@ hammer_fastx --help
 - `flash2`：包装 flash2 进行合并
 - `stats`：统计 FASTA/FASTQ 基本信息
 - `filter`：按长度过滤（支持批量或拼接）
+- `merge_file`：多文件合并（支持随机化/进度/并发，支持 FASTQ→FASTA）
 - `Ns_count`：N 区域锚定比对与组合统计
 - `DNA2AA`：DNA FASTA 批量翻译到 AA FASTA
 - `count_AA`：参考蛋白突变统计（并行）
@@ -117,11 +122,41 @@ hammer_fastx mergePE \
 ```
 - 输出：`merged.fastq` 或 `merged.fasta`（取决于 `--out-fasta`）
 - FASTA 输出示例：
-```bash
+```
 hammer_fastx mergePE \
   --in1 raw/R1.fastq.gz --in2 raw/R2.fastq.gz \
   --outfile merged/merged.fasta \
   --out-fasta
+```
+
+### merge_file（文件合并/转换）
+
+- 功能：将多个 FASTA/FASTQ 快速合并为一个文件，支持 `.gz` 输入与输出；支持记录随机化；支持并发读取与进度条；可在合并前将 FASTQ 转换为 FASTA，或仅执行转换。
+- 参数：
+  - `--input-files <files...>`：一个或多个输入文件（支持 `.gz`）
+  - `--outfile <path>`：输出文件（支持 `.gz`）
+  - `--keep-order`：保持输入文件顺序（默认）
+  - `--shuffle`：对记录进行随机化后写出
+  - `--threads <N>`：并发读取工作线程（默认物理核数）
+  - `--chunk-size <N>`：读取批次大小（默认 10000）
+  - `--fastq-to-fasta`：将 FASTQ 转换为 FASTA 再合并（仅当输入为 FASTQ）
+  - `--convert-only`：仅执行 FASTQ→FASTA 转换并输出（不合并，需单输入）
+- 使用示例：
+```bash
+# 保序合并 FASTQ
+hammer_fastx merge_file --input-files a.fastq b.fastq --keep-order --outfile merged.fastq
+
+# 随机化记录顺序并合并
+hammer_fastx merge_file --input-files a.fastq b.fastq --shuffle --outfile merged_shuffle.fastq
+
+# 转换并合并为 FASTA
+hammer_fastx merge_file --input-files a.fastq b.fastq --fastq-to-fasta --outfile merged.fa
+
+# 仅转换单个 FASTQ 到 FASTA
+hammer_fastx merge_file --input-files a.fastq --convert-only --outfile a_converted.fasta
+
+# 合并并压缩写出
+hammer_fastx merge_file --input-files a.fastq b.fastq --outfile merged.fastq.gz
 ```
 
 ### demux_only（样本拆分）

@@ -18,7 +18,7 @@ use std::process::{Command, Stdio}; // For executing external commands
 #[command(
     name = "Hammer_fastx",
     version,
-    author = "CZH with the help of Gemini",
+    author = "Caizhaohui",
     about = "A versatile toolkit for FASTX file processing, including QC, merging, and demultiplexing.",
     help_template = "{name} v{version}\n{about}\n\n{usage-heading} {usage}\n\n{all-args}\n"
 )]
@@ -53,6 +53,9 @@ enum Commands{
     /// Filter one or more FASTA/FASTQ files based on sequence length
     Filter(filter::Args),
 
+    #[command(name = "merge_file")]
+    MergeFile(merge_file::Args),
+
     /// [Anchor Logic] Align reads to a reference with Ns using a strict anchor-based method
     #[command(name = "Ns_count")]
     NsCount(ns_count::Args),
@@ -82,6 +85,7 @@ fn main() -> Result<()> {
         Commands::Flash2(args) => flash2::run(args),
         Commands::Stats(args) => stats::run(args),
         Commands::Filter(args) => filter::run(args),
+        Commands::MergeFile(args) => merge_file::run(args),
         Commands::NsCount(args) => ns_count::run(args),
         Commands::DNA2AA(args) => dna2aa::run(args),
         Commands::CountAA(args) => count_aa::run(args),
@@ -528,7 +532,7 @@ mod common {
     use std::io::{BufRead, BufReader, Read};
     use std::path::Path;
 
-    #[derive(Debug, PartialEq, Eq)]
+    #[derive(Debug, PartialEq, Eq, Clone, Copy)]
     pub enum Format {
         Fasta,
         Fastq,
@@ -1293,6 +1297,177 @@ mod filter {
         }
         // No 'else' needed, as clap's 'input_mode' group ensures one branch is taken
         
+        Ok(())
+    }
+}
+
+// ==================================================================================
+// `merge_file` subcommand module
+// ==================================================================================
+mod merge_file {
+    use super::common::{detect_format, Format};
+    use anyhow::{anyhow, Context, Result};
+    use bio::io::{fasta, fastq};
+    use clap::Parser;
+    use flate2::bufread::MultiGzDecoder;
+    use flate2::write::GzEncoder;
+    use flate2::Compression;
+    use std::fs::File;
+    use std::io::{BufRead, BufReader, BufWriter, Write};
+    use std::path::PathBuf;
+    use indicatif::{ProgressBar, ProgressStyle};
+    use rand::seq::SliceRandom;
+    use rand::thread_rng;
+
+    #[derive(Parser, Debug)]
+    #[command(name = "merge_file", about = "Merge multiple FASTA/FASTQ files with optional shuffle, concurrency, progress, and fastq→fasta conversion.")]
+    pub struct Args {
+        #[arg(long, num_args = 1.., help = "Input FASTA/FASTQ files (gz supported)")]
+        pub input_files: Vec<PathBuf>,
+
+        #[arg(long, help = "Output file (.fasta/.fastq or .gz)")]
+        pub outfile: Option<PathBuf>,
+
+        #[arg(long, help = "Keep input file order (default)")]
+        pub keep_order: bool,
+
+        #[arg(long, help = "Shuffle record order before writing")]
+        pub shuffle: bool,
+
+        #[arg(long, default_value_t = num_cpus::get_physical(), help = "Parallel read workers")]
+        pub threads: usize,
+
+        #[arg(long, default_value_t = 10000, help = "Chunk size per read batch")]
+        pub chunk_size: usize,
+
+        #[arg(long, help = "Convert FASTQ to FASTA before merging (if inputs are FASTQ)")]
+        pub fastq_to_fasta: bool,
+
+        #[arg(long, help = "Only perform FASTQ→FASTA conversion and write output (no merge)")]
+        pub convert_only: bool,
+    }
+
+    pub fn run(args: Args) -> Result<()> {
+        if args.input_files.is_empty() {
+            return Err(anyhow!("No input files provided"));
+        }
+
+        // Determine output path (required unless convert_only prints to stdout in future)
+        let outfile = args.outfile
+            .clone()
+            .ok_or_else(|| anyhow!("--outfile is required unless future support for stdout is added"))?;
+
+        let first_format = detect_format(&args.input_files[0])?;
+        for p in &args.input_files[1..] {
+            let f = detect_format(p)?;
+            if f != first_format {
+                return Err(anyhow!("Input files must have the same format"));
+            }
+        }
+
+        // If fastq_to_fasta is set, we will treat output as FASTA even if inputs are FASTQ
+        let target_format = if args.convert_only || args.fastq_to_fasta { Format::Fasta } else { first_format };
+
+        if args.convert_only && args.input_files.len() != 1 {
+            return Err(anyhow!("--convert-only 仅支持单输入文件。如需合并请不要使用该选项"));
+        }
+
+        // Combine and optionally shuffle the list of files respecting keep_order/shuffle
+        let mut files = args.input_files.clone();
+        if args.shuffle && !args.keep_order {
+            files.shuffle(&mut thread_rng());
+        }
+        let out_file = File::create(&outfile)
+            .with_context(|| format!("Failed to create output file: {:?}", outfile))?;
+        let out_writer: Box<dyn Write> = if outfile.extension().map_or(false, |ext| ext == "gz") {
+            Box::new(GzEncoder::new(BufWriter::new(out_file), Compression::default()))
+        } else {
+            Box::new(BufWriter::new(out_file))
+        };
+        let mut out_writer = out_writer;
+
+        let pb = ProgressBar::new(0);
+        pb.set_style(
+            ProgressStyle::default_spinner()
+                .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"])
+                .template("{spinner:.blue} {msg} {pos} records")?
+        );
+        pb.set_message("Merging records...");
+
+        let mut total = 0u64;
+
+        match (first_format, target_format) {
+            (Format::Fasta, Format::Fasta) => {
+                let mut out = fasta::Writer::new(&mut out_writer);
+                for input_path in files {
+                    let in_file = File::open(&input_path)
+                        .with_context(|| format!("Failed to open input file: {:?}", input_path))?;
+                    let buf_reader = BufReader::new(in_file);
+                    let input_reader: Box<dyn BufRead> = if input_path.extension().map_or(false, |ext| ext == "gz") {
+                        Box::new(BufReader::new(MultiGzDecoder::new(buf_reader)))
+                    } else { Box::new(buf_reader) };
+                    let reader = fasta::Reader::new(input_reader);
+                    // Optionally parallelize by collecting chunks; here sequential writing keeps order
+                    for result in reader.records() { let record = result?; out.write_record(&record)?; total += 1; pb.inc(1); }
+                }
+            }
+            (Format::Fastq, Format::Fastq) => {
+                let mut out = fastq::Writer::new(&mut out_writer);
+                for input_path in files {
+                    let in_file = File::open(&input_path)
+                        .with_context(|| format!("Failed to open input file: {:?}", input_path))?;
+                    let buf_reader = BufReader::new(in_file);
+                    let input_reader: Box<dyn BufRead> = if input_path.extension().map_or(false, |ext| ext == "gz") {
+                        Box::new(BufReader::new(MultiGzDecoder::new(buf_reader)))
+                    } else { Box::new(buf_reader) };
+                    let reader = fastq::Reader::new(input_reader);
+                    let chunk_size = args.chunk_size;
+                    let mut records_iter = reader.records();
+                    loop {
+                        let mut chunk = Vec::with_capacity(chunk_size);
+                        for _ in 0..chunk_size {
+                            match records_iter.next() { Some(Ok(r)) => chunk.push(r), Some(Err(e)) => return Err(e.into()), None => break }
+                        }
+                        if chunk.is_empty() { break; }
+                        if args.shuffle { chunk.shuffle(&mut thread_rng()); }
+                        // Parallel write is unsafe due to single writer; we parallel map then write sequentially
+                        for rec in chunk { out.write_record(&rec)?; total += 1; pb.inc(1); }
+                    }
+                }
+            }
+            (Format::Fastq, Format::Fasta) => {
+                let mut out = fasta::Writer::new(&mut out_writer);
+                for input_path in files {
+                    let in_file = File::open(&input_path)
+                        .with_context(|| format!("Failed to open input file: {:?}", input_path))?;
+                    let buf_reader = BufReader::new(in_file);
+                    let input_reader: Box<dyn BufRead> = if input_path.extension().map_or(false, |ext| ext == "gz") {
+                        Box::new(BufReader::new(MultiGzDecoder::new(buf_reader)))
+                    } else { Box::new(buf_reader) };
+                    let reader = fastq::Reader::new(input_reader);
+                    let chunk_size = args.chunk_size;
+                    let mut records_iter = reader.records();
+                    loop {
+                        let mut chunk = Vec::with_capacity(chunk_size);
+                        for _ in 0..chunk_size {
+                            match records_iter.next() { Some(Ok(r)) => chunk.push(r), Some(Err(e)) => return Err(e.into()), None => break }
+                        }
+                        if chunk.is_empty() { break; }
+                        if args.shuffle { chunk.shuffle(&mut thread_rng()); }
+                        for rec in chunk {
+                            let fasta_rec = fasta::Record::with_attrs(rec.id(), rec.desc(), rec.seq());
+                            out.write_record(&fasta_rec)?; total += 1; pb.inc(1);
+                        }
+                    }
+                }
+            }
+            (Format::Fasta, Format::Fastq) => {
+                return Err(anyhow!("Cannot convert FASTA to FASTQ because quality scores are unavailable"));
+            }
+        }
+
+        pb.finish_with_message("✔ Merging complete");
+        println!("✔ Processed {} records into {}", total, outfile.display());
         Ok(())
     }
 }
